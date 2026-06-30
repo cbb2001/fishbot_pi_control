@@ -1,0 +1,43 @@
+robot:
+  name: fishbot_pi_control
+
+i2c:
+  bus: 1
+  pca9685_address: 0x40
+  ina219_address: 0x41
+  depth_sensor_address: 0x76
+
+depth_sensor:
+  model: MS5837
+  i2c_address_7bit: 0x76
+  i2c_write_address_8bit: 0xEC
+  i2c_read_address_8bit: 0xED
+  surface_pressure_mbar: 1144.0
+
+uart:
+  uwb_port: /dev/ttyAMA0
+  imu_port: /dev/ttyAMA1
+  baudrate: 115200
+  read_timeout_seconds: 1.0
+
+servo:
+  frequency_hz: 50
+  channels:
+    - name: tail
+      channel: 0
+      center_angle: 90
+      min_angle: 70
+      max_angle: 110
+      pulse_min_us: 500
+      pulse_max_us: 2500
+
+safety:
+  servo:
+    default_center_angle: 90
+    default_min_angle: 70
+    default_max_angle: 110
+    small_step_delta_deg: 5
+    max_test_amplitude_deg: 15
+    max_step_deg: 1
+    step_delay_seconds: 0.08
+    release_pwm_after_tests: true
