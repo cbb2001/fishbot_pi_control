@@ -16,7 +16,7 @@ depth_sensor:
 
 uart:
   uwb_port: /dev/ttyAMA0
-  imu_port: /dev/ttyAMA1
+  imu_port: /dev/ttyAMA4
   baudrate: 115200
   read_timeout_seconds: 1.0
 
