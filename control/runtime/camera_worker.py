@@ -130,6 +130,9 @@ class CameraWorker(BaseSensorWorker):
         buffer: RingBuffer,
         *,
         camera_index: int | str = 0,
+        width: int = 1280,
+        height: int = 480,
+        fourcc: str = "MJPG",
         rate_hz: float = 15.0,
         log_dir: Path | None = None,
         save_frames: bool = False,
@@ -145,6 +148,9 @@ class CameraWorker(BaseSensorWorker):
         period_s = 1.0 / max(float(rate_hz), 0.001)
         super().__init__("vision", buffer, loop_delay_s=period_s, error_backoff_s=1.0)
         self.camera_index = camera_index
+        self.width = int(width)
+        self.height = int(height)
+        self.fourcc = fourcc.strip().upper()
         self.rate_hz = float(rate_hz)
         self.log_dir = Path(log_dir) if log_dir is not None else None
         self.save_frames = bool(save_frames)
@@ -196,6 +202,12 @@ class CameraWorker(BaseSensorWorker):
             "frame_id": self._frame_id,
             "width": int(width),
             "height": int(height),
+            "requested_width": self.width,
+            "requested_height": self.height,
+            "requested_fourcc": self.fourcc,
+            "requested_fps": self.rate_hz,
+            "actual_fourcc": self._actual_fourcc(capture),
+            "actual_fps": self._capture_prop(capture, self._cv2.CAP_PROP_FPS) if self._cv2 is not None else None,
             "mean_brightness": float(frame.mean()),
             "timestamp": time.time(),
             "image_file": self._latest_image_file,
@@ -242,8 +254,40 @@ class CameraWorker(BaseSensorWorker):
             capture = cv2.VideoCapture(self.camera_index)
         if not capture.isOpened():
             raise RuntimeError(f"Could not open camera device: {self.camera_index!r}")
+        self._configure_capture(cv2, capture)
         self._capture = capture
         return capture
+
+    def _configure_capture(self, cv2, capture) -> None:
+        if self.fourcc:
+            if len(self.fourcc) != 4:
+                raise RuntimeError(f"Camera fourcc must be 4 characters, got {self.fourcc!r}")
+            capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
+        if self.width > 0:
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        if self.height > 0:
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        if self.rate_hz > 0:
+            capture.set(cv2.CAP_PROP_FPS, self.rate_hz)
+
+    def _actual_fourcc(self, capture) -> str | None:
+        if self._cv2 is None:
+            return None
+        value = int(self._capture_prop(capture, self._cv2.CAP_PROP_FOURCC) or 0)
+        if value <= 0:
+            return None
+        chars = []
+        for shift in (0, 8, 16, 24):
+            char = chr((value >> shift) & 0xFF)
+            chars.append(char if char.isprintable() else "?")
+        return "".join(chars)
+
+    @staticmethod
+    def _capture_prop(capture, prop_id: int) -> float | None:
+        try:
+            return float(capture.get(prop_id))
+        except Exception:
+            return None
 
     def _should_save(self, now_s: float) -> bool:
         if not self.save_frames or self.save_fps <= 0:

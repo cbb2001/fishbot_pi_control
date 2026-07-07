@@ -4,6 +4,60 @@
 
 当前阶段不是强化学习，不是完整闭环控制，也不是在线遥控机器人。默认入口不会驱动舵机，不会运行 gait，不会调用 RL policy，也不会默认输出 PCA9685 PWM。
 
+## 首先确认树莓派当前 IP
+
+树莓派的 IP 地址不是固定的，不要假设上一次使用的地址仍然有效。每次更换网络或重新连接 Wi-Fi/网线后，先在 Windows PC 和树莓派连接到同一个局域网，再重新查找树莓派 IP。
+
+推荐流程：
+
+1. 在 Windows PC 上查看当前局域网网段：
+
+```powershell
+ipconfig
+```
+
+找到当前正在使用的网卡 IPv4 地址。例如：
+
+```text
+IPv4 Address . . . . . . . . . . . : 10.170.225.113
+```
+
+这说明当前局域网网段通常是：
+
+```text
+10.170.225.0/24
+```
+
+2. 扫描当前网段中开放 SSH 端口 22 的设备：
+
+```powershell
+nmap -Pn -p 22 --open 10.170.225.0/24
+```
+
+如果当前 PC 地址是 `192.168.1.xxx`，则扫描：
+
+```powershell
+nmap -Pn -p 22 --open 192.168.1.0/24
+```
+
+3. 在扫描结果中找到树莓派 IP，并先测试 SSH：
+
+```powershell
+ssh fish@<树莓派IP>
+```
+
+4. 后续所有同步和远程运行命令都使用这个刚发现的 IP。例如：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp <树莓派IP>
+```
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/test_sensor_pipeline.py
+```
+
+如果 Windows 没有 `nmap` 命令，需要先安装 Nmap，或使用项目自带的 `codex_pi_workflow/find_pi.ps1` 辅助查找。
+
 ## 当前阶段目标
 
 1. 稳定采集 IMU、UWB、深度传感器、功率传感器、USB 双目摄像头。
@@ -22,19 +76,19 @@ Windows 本机只用于编辑代码、静态检查、同步代码。树莓派 5 
 不要在 Windows 本机直接运行 I2C、UART、GPIO、PCA9685、摄像头相关硬件代码。硬件脚本必须通过：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 <script> <args>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> <script> <args>
 ```
 
 同步代码到树莓派：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp 192.168.1.111
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp <树莓派IP>
 ```
 
 如果树莓派系统 Python 已经安装了硬件库和 OpenCV，而虚拟环境缺少依赖，可以使用 `-NoVenv`：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/test_sensor_pipeline.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/test_sensor_pipeline.py
 ```
 
 同步脚本主要同步以下路径：
@@ -210,6 +264,9 @@ sensors:
   vision:
     enabled: true
     camera_index: 0
+    width: 1280
+    height: 480
+    fourcc: MJPG
     rate_hz: 15
     buffer_size: 100
     timeout_ms: 300
@@ -226,10 +283,11 @@ sensors:
 
 - 摄像头仍是 optional sensor。
 - 如果 `cv2` 不存在，vision enabled 时会输出 `ok=false, error="opencv_not_available"`，系统继续运行。
+- 摄像头当前请求 combined frame `1280x480`，格式 `MJPG`。
 - 摄像头采集频率 `rate_hz=15` 不等于图片保存频率。
 - JPEG 保存频率由 `save_fps=5` 限制，即每秒最多保存 5 张。
 - 图片保存为 combined frame，例如双目左右拼接的 `1280x480`、`2560x720`、`2560x960` 当前先整体保存。
-- 当前不做 left/right 分割，后续再扩展。
+- 当前不做 left/right 分割，后续再扩展。对于 `1280x480` combined frame，左右单目约为 `640x480`。
 - 图片二进制不会写入 `synchronized_sensors.jsonl`。
 - 图片保存由 `ImageWriter` 后台线程完成，写盘慢时可以丢弃图片保存任务，但不能影响 IMU/depth/power/UWB 采集。
 
@@ -492,19 +550,19 @@ python3 main.py --mode record --mock --duration 10
 ### 1. 同步代码
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp 192.168.1.111
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp <树莓派IP>
 ```
 
 ### 2. mock 测试传感器管线
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/test_sensor_pipeline.py --mock
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/test_sensor_pipeline.py --mock
 ```
 
 ### 3. 真实传感器状态检查
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/test_sensor_pipeline.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/test_sensor_pipeline.py
 ```
 
 该脚本会访问真实 IMU、UWB、depth、power、camera，但不驱动舵机。
@@ -512,19 +570,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_p
 ### 4. 水面 observe
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/run_sensor_observe.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/run_sensor_observe.py
 ```
 
 ### 5. 记录 30 秒传感器数据
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/record_sensors.py --duration 30
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/record_sensors.py --duration 30
 ```
 
 ### 6. 检查最新日志
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/check_latest_log.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/check_latest_log.py
 ```
 
 输出会包含：
@@ -622,13 +680,13 @@ scripts/run_action_pectoral_tail_1.py
 第一次建议小幅度短时间测试：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/run_action_pectoral_tail_1.py --confirm MOVE --duration 5 --tail-frequency 0.3 --tail-amplitude 10 --pectoral-tilt 30
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/run_action_pectoral_tail_1.py --confirm MOVE --duration 5 --tail-frequency 0.3 --tail-amplitude 10 --pectoral-tilt 30
 ```
 
 默认幅度测试：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/run_action_pectoral_tail_1.py --confirm MOVE --duration 10 --tail-frequency 0.5 --tail-amplitude 20 --pectoral-tilt 30
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/run_action_pectoral_tail_1.py --confirm MOVE --duration 10 --tail-frequency 0.5 --tail-amplitude 20 --pectoral-tilt 30
 ```
 
 参数说明：
@@ -657,7 +715,7 @@ logs/YYYYMMDD_HHMMSS_pectoral_tip_mirror_tail_sweep_1/
 USB 双目摄像头测试脚本：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/test_usb_camera.py --frames 10
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/test_usb_camera.py --frames 10
 ```
 
 如果需要保存测试图片，可使用 `test_usb_camera.py` 的保存参数。普通 record 和动作脚本中的图片会保存到当前 run 的 `logs/.../camera/`，不是旧的 `captures/`。
@@ -688,7 +746,7 @@ sudo apt install -y python3-opencv
 
 ## 已验证结果示例
 
-在树莓派 `192.168.1.111` 上曾完成：
+在树莓派实机上曾完成：
 
 - mock 管线测试成功。
 - 真实传感器状态检查成功。
@@ -719,9 +777,9 @@ raw_vision.jsonl: 117 lines
 旧版本只创建 raw 占位文件。当前版本 record 模式会写入实际 raw 样本。请重新同步并运行：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp 192.168.1.111
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/record_sensors.py --duration 10
-powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp 192.168.1.111 -NoVenv scripts/check_latest_log.py
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\sync_to_pi.ps1 -PiIp <树莓派IP>
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/record_sensors.py --duration 10
+powershell -NoProfile -ExecutionPolicy Bypass -File .\codex_pi_workflow\run_on_pi.ps1 -PiIp <树莓派IP> -NoVenv scripts/check_latest_log.py
 ```
 
 ### 摄像头没有数据

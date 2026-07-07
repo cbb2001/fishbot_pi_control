@@ -51,6 +51,9 @@ DEFAULT_SENSOR_CONFIGS: dict[str, dict[str, Any]] = {
     "vision": {
         "enabled": False,
         "camera_index": 0,
+        "width": 1280,
+        "height": 480,
+        "fourcc": "MJPG",
         "rate_hz": 15,
         "buffer_size": 100,
         "timeout_ms": 300,
@@ -264,6 +267,9 @@ class SensorManager:
                 CameraWorker(
                     self.buffers["vision"],
                     camera_index=vision_cfg.get("camera_index", 0),
+                    width=int(vision_cfg.get("width", 1280)),
+                    height=int(vision_cfg.get("height", 480)),
+                    fourcc=str(vision_cfg.get("fourcc", "MJPG")),
                     rate_hz=float(vision_cfg.get("rate_hz", 15)),
                     log_dir=self.log_dir,
                     save_frames=bool(vision_cfg.get("save_frames", False)),

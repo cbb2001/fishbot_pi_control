@@ -47,6 +47,9 @@ sensors:
   vision:
     enabled: true
     camera_index: 0
+    width: 1280
+    height: 480
+    fourcc: MJPG
     rate_hz: 15
     buffer_size: 100
     timeout_ms: 300
