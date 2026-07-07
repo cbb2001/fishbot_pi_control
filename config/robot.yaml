@@ -1,10 +1,77 @@
 robot:
   name: fishbot_pi_control
 
+runtime:
+  mode: sensor_test
+  environment: underwater
+  mock: false
+  log_dir: logs
+  synchronized_sample_hz: 30
+  print_hz: 2
+  flush_interval_s: 1.0
+  offline_recording: true
+  telemetry_enabled: false
+
+sensors:
+  imu:
+    enabled: true
+    port: /dev/ttyAMA4
+    baudrate: 460800
+    buffer_size: 1000
+    timeout_ms: 100
+
+  uwb:
+    enabled: true
+    port: /dev/ttyAMA0
+    baudrate: 115200
+    buffer_size: 300
+    timeout_ms: 500
+    optional_underwater: true
+
+  depth:
+    enabled: true
+    i2c_bus: 1
+    address: 0x76
+    rate_hz: 20
+    buffer_size: 500
+    timeout_ms: 300
+
+  power:
+    enabled: true
+    i2c_bus: 1
+    address: 0x45
+    rate_hz: 2
+    buffer_size: 200
+    timeout_ms: 2000
+
+  vision:
+    enabled: true
+    camera_index: 0
+    rate_hz: 15
+    buffer_size: 100
+    timeout_ms: 300
+    save_frames: true
+    save_fps: 5
+    image_format: jpg
+    jpeg_quality: 85
+    save_combined_frame: true
+    split_stereo: false
+    max_image_queue_size: 100
+
+logging:
+  enabled: true
+  base_dir: logs
+  flush_interval_s: 1.0
+  write_queue_maxsize: 10000
+  synchronized_file: synchronized_sensors.jsonl
+  events_file: events.jsonl
+  camera_index_file: camera_index.jsonl
+  metadata_file: metadata.yaml
+
 i2c:
   bus: 1
   pca9685_address: 0x40
-  ina219_address: 0x41
+  ina219_address: 0x45
   depth_sensor_address: 0x76
 
 depth_sensor:
@@ -22,16 +89,127 @@ uart:
 
 servo:
   frequency_hz: 50
+  enable_pin: 4
+  pulse_min_us: 500
+  pulse_max_us: 2500
   channels:
-    - name: tail
+    - name: WQ1
+      servo_id: 1
+      role: tail_front
+      joint_name: WQ1_JOINT
       channel: 0
-      center_angle: 90
-      min_angle: 70
+      center_angle: 80
+      min_angle: 50
       max_angle: 110
-      pulse_min_us: 500
-      pulse_max_us: 2500
+      actuation_range: 180
+      sign: 1
+      direction:
+        reference_view: tail_to_head
+        angle_increases_toward: left
+        angle_decreases_toward: right
+        left_reference_angle: 110
+        right_reference_angle: 80
+    - name: WQ2
+      servo_id: 2
+      role: tail_middle
+      joint_name: WQ2_JOINT
+      channel: 1
+      center_angle: 90
+      min_angle: 60
+      max_angle: 120
+      actuation_range: 180
+      sign: 1
+      direction:
+        reference_view: tail_to_head
+        angle_increases_toward: left
+        angle_decreases_toward: right
+        left_reference_angle: 120
+        right_reference_angle: 60
+    - name: WQ3
+      servo_id: 3
+      role: tail_rear
+      joint_name: WQ3_JOINT
+      channel: 2
+      center_angle: 90
+      min_angle: 60
+      max_angle: 120
+      actuation_range: 180
+      sign: 1
+      direction:
+        reference_view: tail_to_head
+        angle_increases_toward: left
+        angle_decreases_toward: right
+        left_reference_angle: 120
+        right_reference_angle: 60
+    - name: ZQ1
+      servo_id: 4
+      role: left_pectoral_root
+      joint_name: ZQ1_JOINT
+      channel: 3
+      center_angle: 114
+      min_angle: 74
+      max_angle: 164
+      actuation_range: 270
+      sign: 1
+      direction:
+        reference_axis: top_to_bottom
+        angle_increases_toward: bottom
+        angle_decreases_toward: top
+        top_reference_angle: 74
+        bottom_reference_angle: 164
+    - name: ZQ2
+      servo_id: 5
+      role: left_pectoral_tip
+      joint_name: ZQ2_JOINT
+      channel: 4
+      center_angle: 90
+      min_angle: 0
+      max_angle: 180
+      actuation_range: 180
+      sign: 1
+      direction:
+        forward_angle_direction: increasing
+        forward_side: left_pectoral_forward
+        mirror_servo_id: 7
+    - name: YQ1
+      servo_id: 6
+      role: right_pectoral_root
+      joint_name: YQ1_JOINT
+      channel: 5
+      center_angle: 117
+      min_angle: 82
+      max_angle: 192
+      actuation_range: 270
+      sign: 1
+      direction:
+        reference_axis: top_to_bottom
+        angle_increases_toward: top
+        angle_decreases_toward: bottom
+        top_reference_angle: 192
+        bottom_reference_angle: 82
+    - name: YQ2
+      servo_id: 7
+      role: right_pectoral_tip
+      joint_name: YQ2_JOINT
+      channel: 6
+      center_angle: 90
+      min_angle: 0
+      max_angle: 180
+      actuation_range: 180
+      sign: 1
+      direction:
+        forward_angle_direction: decreasing
+        forward_side: right_pectoral_forward
+        mirror_servo_id: 5
 
 safety:
+  min_voltage_v: 10.5
+  max_current_a: 10.0
+  max_depth_m: 2.0
+  stop_on_imu_timeout: false
+  stop_on_uwb_timeout: false
+  stop_on_vision_timeout: false
+  stop_on_network_lost: false
   servo:
     default_center_angle: 90
     default_min_angle: 70

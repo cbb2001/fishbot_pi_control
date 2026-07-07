@@ -9,7 +9,8 @@ param(
     [string]$PiIp = "",
     [string]$Subnet = "192.168.1.0/24",
     [string]$RemoteUser = "fish",
-    [string]$RemoteDir = "/home/fish/fishbot_pi_control"
+    [string]$RemoteDir = "/home/fish/fishbot_pi_control",
+    [switch]$NoVenv
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,7 +52,12 @@ $sshOptions = @("-o", "BatchMode=yes", "-o", "ConnectTimeout=8")
 
 $pythonArgs = @($Script) + $ScriptArgs
 $quotedPythonArgs = ($pythonArgs | ForEach-Object { Quote-Bash $_ }) -join " "
-$remoteCommand = "cd $(Quote-Bash $RemoteDir) && source .venv/bin/activate && python3 $quotedPythonArgs"
+if ($NoVenv) {
+    $remoteCommand = "cd $(Quote-Bash $RemoteDir) && python3 $quotedPythonArgs"
+}
+else {
+    $remoteCommand = "cd $(Quote-Bash $RemoteDir) && source .venv/bin/activate && python3 $quotedPythonArgs"
+}
 $sshArgs = $sshOptions + @($RemoteHost, $remoteCommand)
 
 Write-Host "Running on Raspberry Pi:"
