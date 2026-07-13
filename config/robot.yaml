@@ -180,17 +180,17 @@ servo:
       role: right_pectoral_root
       joint_name: YQ1_JOINT
       channel: 5
-      center_angle: 117
-      min_angle: 82
-      max_angle: 192
+      center_angle: 140
+      min_angle: 100
+      max_angle: 190
       actuation_range: 270
       sign: 1
       direction:
         reference_axis: top_to_bottom
         angle_increases_toward: top
         angle_decreases_toward: bottom
-        top_reference_angle: 192
-        bottom_reference_angle: 82
+        top_reference_angle: 190
+        bottom_reference_angle: 100
     - name: YQ2
       servo_id: 7
       role: right_pectoral_tip
