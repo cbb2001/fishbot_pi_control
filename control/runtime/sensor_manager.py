@@ -242,6 +242,7 @@ class SensorManager:
                     port=str(imu_cfg.get("port", "/dev/ttyAMA4")),
                     baudrate=int(imu_cfg.get("baudrate", 460800)),
                     timeout_s=float(imu_cfg.get("serial_timeout_s", 0.1)),
+                    sample_rate_hz=float(imu_cfg["sample_rate_hz"]),
                 )
             )
 
@@ -288,7 +289,7 @@ class SensorManager:
 
     def _create_mock_workers(self) -> None:
         rates = {
-            "imu": 100.0,
+            "imu": float(sensor_config(self.config, "imu")["sample_rate_hz"]),
             "uwb": 2.0,
             "depth": float(sensor_config(self.config, "depth").get("rate_hz", 20)),
             "power": float(sensor_config(self.config, "power").get("rate_hz", 2)),

@@ -17,6 +17,7 @@ sensors:
     enabled: true
     port: /dev/ttyAMA4
     baudrate: 460800
+    sample_rate_hz: 200
     buffer_size: 1000
     timeout_ms: 100
 
