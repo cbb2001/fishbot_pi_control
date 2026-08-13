@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -229,8 +230,15 @@ class IMUWorker(BaseSensorWorker):
         baudrate: int = 460800,
         timeout_s: float = 0.1,
         sample_rate_hz: float,
+        stop_event: threading.Event | None = None,
     ) -> None:
-        super().__init__("imu", buffer, loop_delay_s=0.0, error_backoff_s=1.0)
+        super().__init__(
+            "imu",
+            buffer,
+            stop_event=stop_event,
+            loop_delay_s=0.0,
+            error_backoff_s=1.0,
+        )
         self.port = port
         self.baudrate = int(baudrate)
         self.timeout_s = float(timeout_s)
@@ -439,8 +447,15 @@ class UWBWorker(BaseSensorWorker):
         baudrate: int = 115200,
         timeout_s: float = 0.2,
         invalid_interval_s: float = 0.5,
+        stop_event: threading.Event | None = None,
     ) -> None:
-        super().__init__("uwb", buffer, loop_delay_s=0.0, error_backoff_s=1.0)
+        super().__init__(
+            "uwb",
+            buffer,
+            stop_event=stop_event,
+            loop_delay_s=0.0,
+            error_backoff_s=1.0,
+        )
         self.port = port
         self.baudrate = int(baudrate)
         self.timeout_s = float(timeout_s)

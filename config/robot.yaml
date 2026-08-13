@@ -48,14 +48,14 @@ sensors:
   vision:
     enabled: true
     camera_index: 0
-    width: 1280
-    height: 480
+    width: 2560 #1280
+    height: 960 #480
     fourcc: MJPG
     rate_hz: 15
     buffer_size: 100
     timeout_ms: 300
     save_frames: true
-    save_fps: 5
+    save_fps: 20
     image_format: jpg
     jpeg_quality: 85
     save_combined_frame: true
@@ -96,82 +96,98 @@ servo:
   enable_pin: 4
   pulse_min_us: 500
   pulse_max_us: 2500
+  discrete_executor:
+    command_hz: 50
+    # 无位置反馈，只能从各通道配置中位建立模型起点，再用五次曲线进入新动作初始化姿态。
+    initial_move_s: 2.0
+    center_settle_s: 1.0
+    safe_recenter_s: 2.0
+    join_timeout_s: 10.0
+  discrete_absolute_actions:
+    # 名义平均速度上限；动作时间仍严格使用 abs(target-start)/v。
+    tail_max_speed_deg_s: 250 #150.0
+    fin_max_speed_deg_s: 250 #138.0
   channels:
     - name: WQ1
       servo_id: 1
       role: tail_front
       joint_name: WQ1_JOINT
       channel: 0
-      center_angle: 80
-      min_angle: 50
-      max_angle: 110
+      center_angle: 85
+      min_angle: 55
+      max_angle: 115
       actuation_range: 180
       sign: 1
       direction:
         reference_view: tail_to_head
         angle_increases_toward: left
         angle_decreases_toward: right
-        left_reference_angle: 110
-        right_reference_angle: 80
+        left_reference_angle: 115
+        right_reference_angle: 55
     - name: WQ2
       servo_id: 2
       role: tail_middle
       joint_name: WQ2_JOINT
       channel: 1
-      center_angle: 90
-      min_angle: 60
-      max_angle: 120
+      center_angle: 95
+      min_angle: 65
+      max_angle: 125
       actuation_range: 180
       sign: 1
       direction:
         reference_view: tail_to_head
         angle_increases_toward: left
         angle_decreases_toward: right
-        left_reference_angle: 120
-        right_reference_angle: 60
+        left_reference_angle: 125
+        right_reference_angle: 65
     - name: WQ3
       servo_id: 3
       role: tail_rear
       joint_name: WQ3_JOINT
       channel: 2
-      center_angle: 90
-      min_angle: 60
-      max_angle: 120
+      center_angle: 95
+      min_angle: 65
+      max_angle: 125
       actuation_range: 180
       sign: 1
       direction:
         reference_view: tail_to_head
         angle_increases_toward: left
         angle_decreases_toward: right
-        left_reference_angle: 120
-        right_reference_angle: 60
+        left_reference_angle: 125
+        right_reference_angle: 65
     - name: ZQ1
       servo_id: 4
       role: left_pectoral_root
       joint_name: ZQ1_JOINT
       channel: 3
-      center_angle: 114
-      min_angle: 74
-      max_angle: 164
+      center_angle: 111
+      min_angle: 58 #74-164
+      max_angle: 164  #最大转106度
       actuation_range: 270
       sign: 1
       direction:
         reference_axis: top_to_bottom
         angle_increases_toward: bottom
         angle_decreases_toward: top
-        top_reference_angle: 74
+        top_reference_angle: 58
         bottom_reference_angle: 164
     - name: ZQ2
       servo_id: 5
       role: left_pectoral_tip
       joint_name: ZQ2_JOINT
       channel: 4
-      center_angle: 90
+      center_angle: 82
       min_angle: 0
-      max_angle: 180
+      max_angle: 164
       actuation_range: 180
       sign: 1
       direction:
+        reference_axis: top_to_bottom
+        angle_increases_toward: top
+        angle_decreases_toward: bottom
+        top_reference_angle: 180
+        bottom_reference_angle: 0
         forward_angle_direction: increasing
         forward_side: left_pectoral_forward
         mirror_servo_id: 7
@@ -180,36 +196,71 @@ servo:
       role: right_pectoral_root
       joint_name: YQ1_JOINT
       channel: 5
-      center_angle: 140
-      min_angle: 100
-      max_angle: 190
+      center_angle: 143
+      min_angle: 90 #100
+      max_angle: 196 #190
       actuation_range: 270
       sign: 1
       direction:
         reference_axis: top_to_bottom
         angle_increases_toward: top
         angle_decreases_toward: bottom
-        top_reference_angle: 190
-        bottom_reference_angle: 100
+        top_reference_angle: 196
+        bottom_reference_angle: 90
     - name: YQ2
       servo_id: 7
       role: right_pectoral_tip
       joint_name: YQ2_JOINT
       channel: 6
       center_angle: 90
-      min_angle: 0
-      max_angle: 180
+      min_angle: 8
+      max_angle: 172
       actuation_range: 180
       sign: 1
       direction:
+        reference_axis: top_to_bottom
+        angle_increases_toward: bottom
+        angle_decreases_toward: top
+        top_reference_angle: 0
+        bottom_reference_angle: 180
         forward_angle_direction: decreasing
         forward_side: right_pectoral_forward
         mirror_servo_id: 5
 
+# 侧鳍根部位移到尖端配合位移的线性映射标尺。
+# 106° 表示根部参考行程，90° 表示对应尖端参考行程；它们不属于机械限位，
+# 不能替代各舵机 min_angle/max_angle，也不能用于自动缩幅。
+discrete_action_coupling:
+  left:
+    root_reference_span_deg: 106.0
+    tip_reference_span_deg: 90.0
+  right:
+    root_reference_span_deg: 106.0
+    tip_reference_span_deg: 90.0
+
+# 20260725 人工绝对离散动作的独立数学标定。
+# 七路参考中位直接复用上方 servo.channels.center_angle：
+# 85/95/95/121/94/143/90，避免维护两套含义相同的字段。
+# 本段的参考跨度只用于根部位移到尖端峰值的映射，不替代机械限位。
+discrete_absolute_actions_20260725:
+  tail:
+    theta_min_deg: -30.0
+    theta_max_deg: 30.0
+  left_fin:
+    root_servo_id: 4
+    tip_servo_id: 5
+    root_reference_span_deg: 106.0
+    tip_reference_span_deg: 82.0
+  right_fin:
+    root_servo_id: 6
+    tip_servo_id: 7
+    root_reference_span_deg: 106.0
+    tip_reference_span_deg: 82.0
+
 safety:
   min_voltage_v: 10.5
   max_current_a: 10.0
-  max_depth_m: 2.0
+  max_depth_m: 5.0
   stop_on_imu_timeout: false
   stop_on_uwb_timeout: false
   stop_on_vision_timeout: false
@@ -219,7 +270,7 @@ safety:
     default_min_angle: 70
     default_max_angle: 110
     small_step_delta_deg: 5
-    max_test_amplitude_deg: 15
+    max_test_amplitude_deg: 30
     max_step_deg: 1
     step_delay_seconds: 0.08
     release_pwm_after_tests: true

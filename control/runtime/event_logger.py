@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,13 @@ class EventLogger:
         *,
         flush_interval_s: float = 1.0,
         queue_maxsize: int = 10000,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.logger = JsonlLogger(
             path,
             flush_interval_s=flush_interval_s,
             queue_maxsize=queue_maxsize,
+            stop_event=stop_event,
         )
 
     def start(self) -> None:
@@ -41,4 +44,3 @@ class EventLogger:
 
     def stop(self) -> None:
         self.logger.stop()
-

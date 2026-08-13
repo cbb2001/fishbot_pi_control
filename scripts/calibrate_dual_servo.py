@@ -18,25 +18,25 @@ from drivers.pca9685_servo import PCA9685ServoController  # noqa: E402
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Interactively calibrate two servos with independent target angles."
+        description="Interactively calibrate three servos with independent target angles."
     )
     selector = parser.add_mutually_exclusive_group(required=True)
     selector.add_argument(
         "--servo-ids",
         type=int,
-        nargs=2,
-        metavar=("ID1", "ID2"),
-        help="Two mechanical servo ids, for example: --servo-ids 5 7.",
+        nargs=3,
+        metavar=("ID1", "ID2", "ID3"),
+        help="Three mechanical servo ids, for example: --servo-ids 1 2 3.",
     )
     selector.add_argument(
         "--channels",
         type=int,
-        nargs=2,
-        metavar=("CH1", "CH2"),
-        help="Two PCA9685 channels, for example: --channels 4 6.",
+        nargs=3,
+        metavar=("CH1", "CH2", "CH3"),
+        help="Three PCA9685 channels, for example: --channels 0 1 2.",
     )
     parser.add_argument("--confirm", default="", help="Must be MOVE to command hardware.")
-    parser.add_argument("--hold-pwm", action="store_true", help="Keep both PWM outputs active when exiting.")
+    parser.add_argument("--hold-pwm", action="store_true", help="Keep all three PWM outputs active when exiting.")
     return parser.parse_args()
 
 
@@ -44,10 +44,10 @@ def _select_items(config: dict, servo_ids: list[int] | None, channels: list[int]
     configured = configured_servo_channels(config)
     requested = servo_ids if servo_ids is not None else channels
     key = "servo_id" if servo_ids is not None else "channel"
-    if requested is None or len(requested) != 2:
-        raise SystemExit("Exactly two servos must be selected.")
-    if requested[0] == requested[1]:
-        raise SystemExit("The two selected servos must be different.")
+    if requested is None or len(requested) != 3:
+        raise SystemExit("Exactly three servos must be selected.")
+    if len(set(requested)) != 3:
+        raise SystemExit("The three selected servos must be different.")
 
     by_value = {int(item.get(key, -1)): item for item in configured}
     missing = [value for value in requested if value not in by_value]
@@ -86,13 +86,13 @@ def _print_help(items: list[dict]) -> None:
         print(line)
     print("  set <id> <deg>  same as '<id> <deg>'")
     print("  center <id>     move one selected servo to its configured center")
-    print("  center all      move both selected servos to configured centers")
+    print("  center all      move all selected servos to configured centers")
     print("  c <id>          print current angle as candidate center")
     print("  min <id>        print current angle as candidate minimum")
     print("  max <id>        print current angle as candidate maximum")
-    print("  show             print both current angles and configured ranges")
+    print("  show             print all current angles and configured ranges")
     print("  help             print these commands")
-    print("  q                recenter both, release PWM, and quit")
+    print("  q                recenter all, release PWM, and quit")
     print("")
 
 
@@ -138,8 +138,8 @@ def main() -> None:
             return None
         return item
 
-    print("Starting independent dual-servo calibration.")
-    print("Moving both selected servos to their configured centers first.")
+    print("Starting independent three-servo calibration.")
+    print("Moving all selected servos to their configured centers first.")
     _print_status(items, angles, limits_by_channel)
     _print_help(items)
 
@@ -149,7 +149,7 @@ def main() -> None:
             controller.move_safely(channel, angles[channel])
 
         while True:
-            raw = input("dual-calibrate> ").strip().lower()
+            raw = input("triple-calibrate> ").strip().lower()
             if raw in {"", "show"}:
                 _print_status(items, angles, limits_by_channel)
                 continue
@@ -203,7 +203,7 @@ def main() -> None:
         print("Interrupted.")
     finally:
         if not args.hold_pwm:
-            print("Recentering both servos and releasing PWM.")
+            print("Recentering all selected servos and releasing PWM.")
             for item in items:
                 channel = int(item["channel"])
                 controller.move_safely(channel, limits_by_channel[channel].center_angle)

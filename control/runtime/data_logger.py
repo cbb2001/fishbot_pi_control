@@ -36,11 +36,13 @@ class JsonlLogger:
         *,
         flush_interval_s: float = 1.0,
         queue_maxsize: int = 10000,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.path = Path(path)
         self.flush_interval_s = max(0.1, float(flush_interval_s))
         self.queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, int(queue_maxsize)))
-        self.stop_event = threading.Event()
+        self.stop_event = stop_event or threading.Event()
+        self._external_stop_event = stop_event is not None
         self._thread: threading.Thread | None = None
         self.dropped_count = 0
         self.last_error: str | None = None
@@ -49,7 +51,8 @@ class JsonlLogger:
         if self._thread and self._thread.is_alive():
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.stop_event.clear()
+        if not self._external_stop_event:
+            self.stop_event.clear()
         self._thread = threading.Thread(target=self._run, name=f"jsonl-{self.path.name}", daemon=True)
         self._thread.start()
 
@@ -67,6 +70,9 @@ class JsonlLogger:
         self.stop_event.set()
         if self._thread:
             self._thread.join(timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     def _run(self) -> None:
         try:
@@ -107,6 +113,7 @@ class RawSensorLoggers:
         *,
         flush_interval_s: float = 1.0,
         queue_maxsize: int = 10000,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.log_dir = Path(log_dir)
         self.loggers = {
@@ -114,6 +121,7 @@ class RawSensorLoggers:
                 self.log_dir / filename,
                 flush_interval_s=flush_interval_s,
                 queue_maxsize=queue_maxsize,
+                stop_event=stop_event,
             )
             for name, filename in RAW_SENSOR_FILES.items()
         }

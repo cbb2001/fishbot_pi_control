@@ -35,6 +35,7 @@ class ImageWriter:
         max_queue_size: int = 100,
         flush_interval_s: float = 1.0,
         index_queue_maxsize: int = 10000,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.log_dir = Path(log_dir)
         self.camera_dir = camera_dir
@@ -45,7 +46,8 @@ class ImageWriter:
             queue_maxsize=index_queue_maxsize,
         )
         self.queue: queue.Queue[ImageSaveTask] = queue.Queue(maxsize=max(1, int(max_queue_size)))
-        self.stop_event = threading.Event()
+        self.stop_event = stop_event or threading.Event()
+        self._external_stop_event = stop_event is not None
         self._thread: threading.Thread | None = None
         self.dropped_frames = 0
         self.saved_frames = 0
@@ -56,7 +58,8 @@ class ImageWriter:
             return
         self.camera_path.mkdir(parents=True, exist_ok=True)
         self.index_logger.start()
-        self.stop_event.clear()
+        if not self._external_stop_event:
+            self.stop_event.clear()
         self._thread = threading.Thread(target=self._run, name="camera-image-writer", daemon=True)
         self._thread.start()
 
@@ -144,9 +147,16 @@ class CameraWorker(BaseSensorWorker):
         max_image_queue_size: int = 100,
         camera_index_file: str = "camera_index.jsonl",
         flush_interval_s: float = 1.0,
+        stop_event: threading.Event | None = None,
     ) -> None:
         period_s = 1.0 / max(float(rate_hz), 0.001)
-        super().__init__("vision", buffer, loop_delay_s=period_s, error_backoff_s=1.0)
+        super().__init__(
+            "vision",
+            buffer,
+            stop_event=stop_event,
+            loop_delay_s=period_s,
+            error_backoff_s=1.0,
+        )
         self.camera_index = camera_index
         self.width = int(width)
         self.height = int(height)
@@ -167,6 +177,9 @@ class CameraWorker(BaseSensorWorker):
         self._cv2: Any | None = None
         self._capture: Any | None = None
         self._image_writer: ImageWriter | None = None
+        # close() 后保留只读诊断引用，使主线程仍能检查最终 flush、错误和
+        # join 状态；不会用于再次写图，也不会阻止线程正常退出。
+        self._closed_image_writer: ImageWriter | None = None
         self._frame_id = 0
         self._next_cv2_retry_s = 0.0
         self._next_save_s = 0.0
@@ -228,7 +241,9 @@ class CameraWorker(BaseSensorWorker):
     def close(self) -> None:
         self._close_capture()
         if self._image_writer is not None:
-            self._image_writer.stop()
+            writer = self._image_writer
+            writer.stop()
+            self._closed_image_writer = writer
             self._image_writer = None
 
     def _ensure_cv2(self, now_s: float):
@@ -337,6 +352,7 @@ class CameraWorker(BaseSensorWorker):
             index_file=self.camera_index_file,
             max_queue_size=self.max_image_queue_size,
             flush_interval_s=self.flush_interval_s,
+            stop_event=self.stop_event,
         )
         self._image_writer.start()
         return self._image_writer

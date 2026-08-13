@@ -68,7 +68,8 @@ $itemsToSync = @(
     "config",
     "drivers",
     "control",
-    "scripts"
+    "scripts",
+    "missions"
 )
 
 $excludedDirs = @(".git", ".venv", "__pycache__", ".vscode", "codex_pi_workflow")

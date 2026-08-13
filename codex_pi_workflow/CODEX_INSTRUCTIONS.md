@@ -109,6 +109,7 @@ ssh fish@<树莓派IP> "cd /home/fish/fishbot_pi_control && source .venv/bin/act
 - `drivers/`
 - `control/`
 - `scripts/`
+- `missions/`
 
 不同步：
 
@@ -121,7 +122,7 @@ ssh fish@<树莓派IP> "cd /home/fish/fishbot_pi_control && source .venv/bin/act
 
 `codex_pi_workflow/` 是本机工作流文件夹，不复制到树莓派。
 
-同步脚本会在确认远程目录严格等于 `/home/fish/fishbot_pi_control` 后，先删除远端同步范围内的同名文件/目录，再上传当前本机版本。因此，本机在 `config/`、`drivers/`、`control/`、`scripts/` 内删除的文件，会在下一次同步后从树莓派项目目录中消失。脚本不会删除 `/home/fish` 下其他文件，也不会同步或删除树莓派项目里的 `.venv`。
+同步脚本会在确认远程目录严格等于 `/home/fish/fishbot_pi_control` 后，先删除远端同步范围内的同名文件/目录，再上传当前本机版本。因此，本机在 `config/`、`drivers/`、`control/`、`scripts/`、`missions/` 内删除的文件，会在下一次同步后从树莓派项目目录中消失。脚本不会删除 `/home/fish` 下其他文件，也不会同步或删除树莓派项目里的 `.venv`。
 
 同步完成后，脚本会确保树莓派项目根目录下存在 `captures/`，用于保存摄像头采集数据。`captures/` 不纳入镜像同步范围，避免后续同步误删树莓派上已经采集的图片或视频。
 

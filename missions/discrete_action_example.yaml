@@ -1,0 +1,37 @@
+name: discrete_action_example
+
+
+tail_actions:
+  - t: 1 #0.2
+    A: 30
+  - t: 1 #0.2
+    A: 0
+  - t: 1
+    A: -60
+  - t: 1
+    A: 0
+  - t: 1
+    A: 60
+  - t: 1
+    A: 0
+  - t: 1
+    A: -30
+
+
+left_fin_actions:
+  - t: 1 #0.8
+    b: 1
+    r: 1
+  - t: 1 
+    b: -1
+    r: 1
+  
+
+right_fin_actions:
+  - t: 1
+    b: 1
+    r: 1
+  - t: 1
+    b: -1
+    r: 1
+

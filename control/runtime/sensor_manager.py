@@ -83,8 +83,14 @@ class MockSensorWorker(BaseSensorWorker):
         rate_hz: float,
         environment: str,
         save_fps: float = 5.0,
+        stop_event: threading.Event | None = None,
     ) -> None:
-        super().__init__(name, buffer, loop_delay_s=1.0 / max(float(rate_hz), 0.001))
+        super().__init__(
+            name,
+            buffer,
+            stop_event=stop_event,
+            loop_delay_s=1.0 / max(float(rate_hz), 0.001),
+        )
         self.environment = environment
         self._start_s = time.monotonic()
         self.save_fps = float(save_fps)
@@ -158,13 +164,14 @@ class SensorManager:
         *,
         mock: bool | None = None,
         log_dir: str | Path | None = None,
+        stop_event: threading.Event | None = None,
     ) -> None:
         self.config = config
         runtime_cfg = config.get("runtime", {})
         self.mock = bool(runtime_cfg.get("mock", False) if mock is None else mock)
         self.environment = str(runtime_cfg.get("environment", "underwater"))
         self.log_dir = Path(log_dir) if log_dir is not None else None
-        self.stop_event = threading.Event()
+        self.stop_event = stop_event or threading.Event()
         self.buffers: dict[str, RingBuffer] = {
             name: RingBuffer(int(sensor_config(config, name).get("buffer_size", 100)))
             for name in SENSOR_NAMES
@@ -179,12 +186,12 @@ class SensorManager:
         for worker in self.workers:
             worker.start()
 
-    def stop_all(self) -> None:
+    def stop_all(self, timeout: float | None = 10.0) -> None:
         self.stop_event.set()
         for worker in self.workers:
             worker.stop()
         for worker in self.workers:
-            worker.join(timeout=10.0)
+            worker.join(timeout=timeout)
 
     def get_status(self) -> dict[str, Any]:
         now_ns = time.monotonic_ns()
@@ -243,6 +250,7 @@ class SensorManager:
                     baudrate=int(imu_cfg.get("baudrate", 460800)),
                     timeout_s=float(imu_cfg.get("serial_timeout_s", 0.1)),
                     sample_rate_hz=float(imu_cfg["sample_rate_hz"]),
+                    stop_event=self.stop_event,
                 )
             )
 
@@ -254,6 +262,7 @@ class SensorManager:
                     port=str(uwb_cfg.get("port", "/dev/ttyAMA0")),
                     baudrate=int(uwb_cfg.get("baudrate", 115200)),
                     timeout_s=float(uwb_cfg.get("serial_timeout_s", 0.2)),
+                    stop_event=self.stop_event,
                 )
             )
 
@@ -284,6 +293,7 @@ class SensorManager:
                         self.config.get("logging", {}).get("camera_index_file", "camera_index.jsonl")
                     ),
                     flush_interval_s=float(self.config.get("logging", {}).get("flush_interval_s", 1.0)),
+                    stop_event=self.stop_event,
                 )
             )
 
@@ -306,5 +316,25 @@ class SensorManager:
                     rate_hz=rates[name],
                     environment=self.environment,
                     save_fps=float(cfg.get("save_fps", 5)),
+                    stop_event=self.stop_event,
                 )
             )
+
+    def fatal_errors(self) -> list[dict[str, str]]:
+        """返回未被 invalid 样本机制吸收的线程级异常。"""
+
+        errors: list[dict[str, str]] = []
+        for worker in self.workers:
+            error = getattr(worker, "fatal_error", None)
+            if error:
+                errors.append({"source": type(worker).__name__, "error": str(error)})
+        return errors
+
+    def alive_worker_names(self) -> list[str]:
+        """返回 join 后仍存活的 worker，供清理摘要明确报告。"""
+
+        return [
+            type(worker).__name__
+            for worker in self.workers
+            if callable(getattr(worker, "is_alive", None)) and worker.is_alive()
+        ]

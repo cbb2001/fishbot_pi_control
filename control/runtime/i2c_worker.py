@@ -27,11 +27,12 @@ class I2CWorker:
         self._power_sensor: INA219Sensor | None = None
         self._next_depth_init_try_s = 0.0
         self._next_power_init_try_s = 0.0
+        self.fatal_error: str | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self.run, name="i2c-worker", daemon=True)
+        self._thread = threading.Thread(target=self._run_guarded, name="i2c-worker", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -40,6 +41,15 @@ class I2CWorker:
     def join(self, timeout: float | None = None) -> None:
         if self._thread:
             self._thread.join(timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
+
+    def _run_guarded(self) -> None:
+        try:
+            self.run()
+        except BaseException as exc:
+            self.fatal_error = f"{type(exc).__name__}: {exc}"
 
     def run(self) -> None:
         sensors = self.config.get("sensors", {})
@@ -190,4 +200,3 @@ class I2CWorker:
             ok=ok,
             error=error,
         )
-

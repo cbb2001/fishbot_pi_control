@@ -46,7 +46,8 @@ class SensorSynchronizer:
             }
 
         buffer = self.buffers.get(name)
-        sample = buffer.latest() if buffer is not None else None
+        # 按同步截止时刻取最近样本，避免把未来重建时间戳的样本错误挂到更早记录。
+        sample = buffer.get_latest_before(now_ns) if buffer is not None else None
         if sample is None:
             return {
                 "valid": False,
@@ -100,7 +101,12 @@ class SensorSynchronizer:
             return None
         samples = [
             sample for sample in buffer.snapshot()
-            if isinstance(sample, SensorSample) and sample.ok and "depth_m" in sample.data
+            if (
+                isinstance(sample, SensorSample)
+                and sample.ok
+                and sample.t_ns <= now_ns
+                and "depth_m" in sample.data
+            )
         ]
         if len(samples) < 2:
             return None

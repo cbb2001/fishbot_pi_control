@@ -25,11 +25,12 @@ class BaseSensorWorker:
         self.error_backoff_s = max(0.0, float(error_backoff_s))
         self._thread: threading.Thread | None = None
         self._seq = 0
+        self.fatal_error: str | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        self._thread = threading.Thread(target=self.run, name=f"{self.name}-worker", daemon=True)
+        self._thread = threading.Thread(target=self._run_guarded, name=f"{self.name}-worker", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -38,6 +39,9 @@ class BaseSensorWorker:
     def join(self, timeout: float | None = None) -> None:
         if self._thread:
             self._thread.join(timeout)
+
+    def is_alive(self) -> bool:
+        return bool(self._thread and self._thread.is_alive())
 
     def read_once(self) -> SensorSample | list[SensorSample] | None:
         raise NotImplementedError
@@ -52,7 +56,18 @@ class BaseSensorWorker:
                 self.buffer.append(self.make_sample({}, ok=False, error=f"{type(exc).__name__}: {exc}"))
                 self.on_error(exc)
                 self._sleep_interruptible(self.error_backoff_s)
-        self.close()
+
+    def _run_guarded(self) -> None:
+        try:
+            self.run()
+        except BaseException as exc:
+            self.fatal_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            try:
+                self.close()
+            except BaseException as exc:
+                if self.fatal_error is None:
+                    self.fatal_error = f"{type(exc).__name__}: {exc}"
 
     def on_error(self, exc: Exception) -> None:
         _ = exc
@@ -91,4 +106,3 @@ class BaseSensorWorker:
         if seconds <= 0:
             return
         self.stop_event.wait(seconds)
-

@@ -32,15 +32,46 @@ class PCA9685ServoController:
         self._last_angles: dict[int, float] = {}
 
         enable_pin = servo_config.get("enable_pin")
-        self._enable_pin = OutputDevice(int(enable_pin)) if enable_pin is not None else None
-        if self._enable_pin is not None:
-            self._enable_pin.on()
+        self._enable_pin = None
+        self._kit = None
+        try:
+            self._enable_pin = (
+                OutputDevice(int(enable_pin))
+                if enable_pin is not None
+                else None
+            )
+            if self._enable_pin is not None:
+                self._enable_pin.on()
 
-        self._kit = ServoKit(channels=int(servo_config.get("pca9685_channels", 16)))
-        for item in self._channels:
-            servo = self._kit.servo[item.channel]
-            servo.set_pulse_width_range(item.pulse_min_us, item.pulse_max_us)
-            servo.actuation_range = item.actuation_range
+            self._kit = ServoKit(
+                channels=int(servo_config.get("pca9685_channels", 16))
+            )
+            for item in self._channels:
+                servo = self._kit.servo[item.channel]
+                servo.set_pulse_width_range(
+                    item.pulse_min_us,
+                    item.pulse_max_us,
+                )
+                servo.actuation_range = item.actuation_range
+        except BaseException:
+            # 构造器尚未返回时 ServoExecutor 拿不到 controller，因而必须在
+            # 驱动内部回滚已经打开的使能脚和可能存在的 PWM 对象。
+            if self._kit is not None:
+                for item in self._channels:
+                    try:
+                        self._kit.servo[item.channel].angle = None
+                    except Exception:
+                        pass
+            if self._enable_pin is not None:
+                try:
+                    self._enable_pin.off()
+                except Exception:
+                    pass
+                try:
+                    self._enable_pin.close()
+                except Exception:
+                    pass
+            raise
 
     def _load_channel_configs(self) -> list[ServoChannelConfig]:
         servo_config = self._config.get("servo", {})
