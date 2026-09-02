@@ -177,9 +177,9 @@ servo:
       role: left_pectoral_tip
       joint_name: ZQ2_JOINT
       channel: 4
-      center_angle: 82
+      center_angle: 90
       min_angle: 0
-      max_angle: 164
+      max_angle: 180
       actuation_range: 180
       sign: 1
       direction:
@@ -213,8 +213,8 @@ servo:
       joint_name: YQ2_JOINT
       channel: 6
       center_angle: 90
-      min_angle: 8
-      max_angle: 172
+      min_angle: 0
+      max_angle: 180
       actuation_range: 180
       sign: 1
       direction:
