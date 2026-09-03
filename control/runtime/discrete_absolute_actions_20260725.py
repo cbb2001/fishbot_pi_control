@@ -16,7 +16,7 @@ ALL_SERVO_IDS = TAIL_SERVO_IDS + LEFT_FIN_SERVO_IDS + RIGHT_FIN_SERVO_IDS
 SEQUENCE_NAMES = ("tail", "left_fin", "right_fin")
 
 # 这些默认值只在这一处声明。robot.yaml 可以显式覆盖，但项目默认配置必须保持
-# 题目给出的 1～7 号参考姿态、尾鳍范围以及 106/86 耦合标尺。
+# 当前 1～7 号参考姿态、尾鳍范围以及 106/90 耦合标尺。
 DEFAULT_ACTION_CONFIG: dict[str, Any] = {
     "tail": {
         "servo_1_center_deg": 85.0,
@@ -28,10 +28,10 @@ DEFAULT_ACTION_CONFIG: dict[str, Any] = {
     "left_fin": {
         "root_servo_id": 4,
         "tip_servo_id": 5,
-        "root_center_deg": 121.0,
-        "tip_center_deg": 94.0,
+        "root_center_deg": 111.0,
+        "tip_center_deg": 90.0,
         "root_reference_span_deg": 106.0,
-        "tip_reference_span_deg": 86.0,
+        "tip_reference_span_deg": 90.0,
     },
     "right_fin": {
         "root_servo_id": 6,
@@ -39,7 +39,7 @@ DEFAULT_ACTION_CONFIG: dict[str, Any] = {
         "root_center_deg": 143.0,
         "tip_center_deg": 90.0,
         "root_reference_span_deg": 106.0,
-        "tip_reference_span_deg": 86.0,
+        "tip_reference_span_deg": 90.0,
     },
 }
 
@@ -324,7 +324,7 @@ def evaluate_fin_tip_motion(
     elapsed_s: float,
     duration_s: float,
 ) -> float:
-    """计算胸鳍尖端在前半程到峰值、后半程回中位的轨迹。"""
+    """计算胸鳍尖端首尾四分之一平滑运动、中间保持峰值的轨迹。"""
 
     duration = float(duration_s)
     if duration <= 0.0:
@@ -334,16 +334,24 @@ def evaluate_fin_tip_motion(
         return float(center_deg)
     if elapsed >= duration:
         return float(center_deg)
-    half = duration / 2.0
-    if elapsed <= half:
-        return smooth_motion(center_deg, peak_deg, elapsed, half)
-    return smooth_motion(peak_deg, center_deg, elapsed - half, half)
+    quarter = duration / 4.0
+    three_quarters = 3.0 * quarter
+    if elapsed <= quarter:
+        return smooth_motion(center_deg, peak_deg, elapsed, quarter)
+    if elapsed <= three_quarters:
+        return float(peak_deg)
+    return smooth_motion(
+        peak_deg,
+        center_deg,
+        elapsed - three_quarters,
+        quarter,
+    )
 
 
 def build_calibration(config: dict[str, Any]) -> RobotCalibration:
     """从 robot.yaml 构造新动作标定并验证全部参考中位。
 
-    现有 servo.channels.center_angle 已与题目给出的 85/95/95/121/94/143/90
+    现有 servo.channels.center_angle 已与当前标定的 85/95/95/111/90/143/90
     等价，因此默认直接复用。若新配置段显式提供 center 字段，则使用该字段，
     但仍必须通过对应舵机机械限位。
     """
@@ -659,7 +667,7 @@ def _reference_center(
 
     当前 robot.yaml 明确配置了七路 center_angle，因此优先复用而不重复维护
     同义字段。若精简配置没有该旧字段，则回退到本模块唯一常量块中规定的
-    85/95/95/121/94/143/90，而不是误用全局通用的 90°安全默认值。
+    85/95/95/111/90/143/90，而不是误用全局通用的 90°安全默认值。
     """
 
     if key in raw:

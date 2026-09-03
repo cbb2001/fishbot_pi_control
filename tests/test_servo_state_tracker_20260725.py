@@ -46,7 +46,7 @@ class ServoStateTracker20260725Tests(unittest.TestCase):
             self.calibration.initial_angles_deg,
         )
         self.assertEqual(pose["previous_action1_theta"], 0.0)
-        self.assertEqual(pose["previous_action2_theta"], 121.0)
+        self.assertEqual(pose["previous_action2_theta"], 111.0)
         self.assertEqual(pose["previous_action3_theta"], 143.0)
         self.assertIsNone(pose["tail_action_index"])
 
@@ -142,8 +142,8 @@ class ServoStateTracker20260725Tests(unittest.TestCase):
                 1: 115.0,
                 2: 125.0,
                 3: 125.0,
-                4: 121.0,
-                5: 94.0,
+                4: 111.0,
+                5: 90.0,
                 6: 143.0,
                 7: 90.0,
             },

@@ -98,13 +98,16 @@ class RunDiscreteAbsoluteActions20260725Tests(unittest.TestCase):
             mission,
             build_calibration(load_robot_config()),
         )
-        self.assertEqual(mission.name, "discrete_absolute_actions_20260725_example")
-        self.assertEqual(len(mission.tail_actions), 4)
-        self.assertEqual(len(mission.left_fin_actions), 4)
-        self.assertEqual(len(mission.right_fin_actions), 3)
-        self.assertEqual(mission.tail_actions[2].theta, 15.0)
-        self.assertEqual(mission.left_fin_actions[2].b2, -1)
-        self.assertEqual(mission.right_fin_actions[-1].theta, 120.0)
+        self.assertEqual(
+            mission.name,
+            "discrete_absolute_actions_20260725_action4_down_tail_fins_up_A",
+        )
+        self.assertEqual(len(mission.tail_actions), 141)
+        self.assertEqual(len(mission.left_fin_actions), 140)
+        self.assertEqual(len(mission.right_fin_actions), 140)
+        self.assertEqual(mission.tail_actions[0].theta, 15.0)
+        self.assertEqual(mission.left_fin_actions[1].b2, 1)
+        self.assertEqual(mission.right_fin_actions[1].b2, -1)
 
         sync_text = (
             PROJECT_ROOT / "codex_pi_workflow" / "sync_to_pi.ps1"
@@ -277,7 +280,7 @@ class RunDiscreteAbsoluteActions20260725Tests(unittest.TestCase):
                 metadata["action_reference"]["left_fin"][
                     "tip_reference_span_deg"
                 ],
-                86.0,
+                90.0,
             )
             commands = [
                 json.loads(line)

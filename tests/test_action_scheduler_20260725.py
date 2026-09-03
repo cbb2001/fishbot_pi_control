@@ -130,7 +130,7 @@ class ActionScheduler20260725Tests(unittest.TestCase):
         scheduler = self._scheduler()
         scheduler.start(5_000)
         left = scheduler.active("left_fin")
-        self.assertEqual(scheduler.previous_thetas["left_fin"], 121.0)
+        self.assertEqual(scheduler.previous_thetas["left_fin"], 111.0)
 
         transition = scheduler.complete(
             "left_fin",
@@ -143,7 +143,7 @@ class ActionScheduler20260725Tests(unittest.TestCase):
         self.assertTrue(transition.finished.endpoint_written)
         self.assertEqual(
             transition.finished.previous_theta_before_commit,
-            121.0,
+            111.0,
         )
         self.assertEqual(
             transition.finished.previous_theta_after_commit,

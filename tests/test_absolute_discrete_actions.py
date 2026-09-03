@@ -97,7 +97,7 @@ class AbsoluteDiscreteActionTests(unittest.TestCase):
         next(raw for raw in config["servo"]["channels"] if raw["servo_id"] == 5)["max_angle"] = 170
         calibration = build_absolute_calibration(config)
         mission = AbsoluteMission("bad", (),
-            (FinAbsoluteAction(68, 20, 0), FinAbsoluteAction(174, 20, 1)), ())
+            (FinAbsoluteAction(58, 20, 0), FinAbsoluteAction(164, 20, 1)), ())
         with self.assertRaisesRegex(MissionValidationError, "5号舵机目标角"):
             validate_absolute_mission(mission, calibration)
 

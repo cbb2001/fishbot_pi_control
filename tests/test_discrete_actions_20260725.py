@@ -11,6 +11,7 @@ from control.runtime.discrete_absolute_actions_20260725 import (
     TailAction,
     build_calibration,
     build_trajectory,
+    evaluate_fin_tip_motion,
     quintic_smoothstep,
     smooth_motion,
     validate_mission,
@@ -28,21 +29,43 @@ class DiscreteActions20260725Tests(unittest.TestCase):
     def test_default_reference_values_are_exact(self) -> None:
         self.assertEqual(
             self.calibration.initial_angles_deg,
-            {1: 85.0, 2: 95.0, 3: 95.0, 4: 121.0, 5: 94.0, 6: 143.0, 7: 90.0},
+            {1: 85.0, 2: 95.0, 3: 95.0, 4: 111.0, 5: 90.0, 6: 143.0, 7: 90.0},
         )
         self.assertEqual(self.calibration.initial_previous_thetas["tail"], 0.0)
-        self.assertEqual(self.calibration.initial_previous_thetas["left_fin"], 121.0)
+        self.assertEqual(self.calibration.initial_previous_thetas["left_fin"], 111.0)
         self.assertEqual(self.calibration.initial_previous_thetas["right_fin"], 143.0)
         self.assertEqual(self.calibration.tail.theta_min_deg, -30.0)
         self.assertEqual(self.calibration.tail.theta_max_deg, 30.0)
         self.assertEqual(self.calibration.left_fin.root_servo_id, 4)
         self.assertEqual(self.calibration.left_fin.tip_servo_id, 5)
         self.assertEqual(self.calibration.left_fin.root_reference_span_deg, 106.0)
-        self.assertEqual(self.calibration.left_fin.tip_reference_span_deg, 86.0)
+        self.assertEqual(self.calibration.left_fin.tip_reference_span_deg, 90.0)
         self.assertEqual(self.calibration.right_fin.root_servo_id, 6)
         self.assertEqual(self.calibration.right_fin.tip_servo_id, 7)
         self.assertEqual(self.calibration.right_fin.root_reference_span_deg, 106.0)
-        self.assertEqual(self.calibration.right_fin.tip_reference_span_deg, 86.0)
+        self.assertEqual(self.calibration.right_fin.tip_reference_span_deg, 90.0)
+
+    def test_current_references_are_used_when_optional_fields_are_absent(self) -> None:
+        config = copy.deepcopy(self.config)
+        config.pop("discrete_absolute_actions_20260725", None)
+        for servo in config["servo"]["channels"]:
+            servo.pop("center_angle", None)
+
+        calibration = build_calibration(config)
+
+        self.assertEqual(
+            calibration.initial_angles_deg,
+            {1: 85.0, 2: 95.0, 3: 95.0, 4: 111.0, 5: 90.0, 6: 143.0, 7: 90.0},
+        )
+        self.assertEqual(calibration.left_fin.tip_reference_span_deg, 90.0)
+        self.assertEqual(calibration.right_fin.tip_reference_span_deg, 90.0)
+        trajectory = build_trajectory(
+            "left_fin",
+            FinAction(164.0, 4.0, 1, 1),
+            58.0,
+            calibration,
+        )
+        self.assertEqual(trajectory.tip_peak_angle_deg, 180.0)
 
     def test_reference_center_outside_mechanical_range_is_rejected_at_startup(self) -> None:
         config = copy.deepcopy(self.config)
@@ -79,8 +102,8 @@ class DiscreteActions20260725Tests(unittest.TestCase):
 
         trajectory = build_trajectory(
             "left_fin",
-            FinAction(174.0, 1.0, 0, 1),
-            121.0,
+            FinAction(164.0, 1.0, 0, 1),
+            111.0,
             self.calibration,
         )
         root_angle = trajectory.evaluate(u)[4]
@@ -149,47 +172,47 @@ class DiscreteActions20260725Tests(unittest.TestCase):
     def test_action2_increasing_and_decreasing_use_abs_delta_peak(self) -> None:
         increasing = build_trajectory(
             "left_fin",
-            FinAction(174.0, 2.0, 1, 1),
-            121.0,
+            FinAction(164.0, 2.0, 1, 1),
+            111.0,
             self.calibration,
         )
         decreasing = build_trajectory(
             "left_fin",
-            FinAction(68.0, 2.0, 1, -1),
-            121.0,
+            FinAction(58.0, 2.0, 1, -1),
+            111.0,
             self.calibration,
         )
-        expected_positive_peak = 94.0 + 53.0 / 106.0 * 86.0
-        expected_negative_peak = 94.0 - 53.0 / 106.0 * 86.0
+        expected_positive_peak = 135.0
+        expected_negative_peak = 45.0
         self.assertAlmostEqual(increasing.tip_peak_angle_deg, expected_positive_peak)
         self.assertAlmostEqual(decreasing.tip_peak_angle_deg, expected_negative_peak)
-        self.assertEqual(increasing.evaluate(0.0), {4: 121.0, 5: 94.0})
-        self.assertAlmostEqual(increasing.evaluate(1.0)[4], 147.5)
+        self.assertEqual(increasing.evaluate(0.0), {4: 111.0, 5: 90.0})
+        self.assertAlmostEqual(increasing.evaluate(1.0)[4], 137.5)
         self.assertAlmostEqual(increasing.evaluate(1.0)[5], expected_positive_peak)
-        self.assertEqual(increasing.evaluate(2.0), {4: 174.0, 5: 94.0})
-        self.assertEqual(decreasing.evaluate(0.0), {4: 121.0, 5: 94.0})
-        self.assertAlmostEqual(decreasing.evaluate(1.0)[4], 94.5)
+        self.assertEqual(increasing.evaluate(2.0), {4: 164.0, 5: 90.0})
+        self.assertEqual(decreasing.evaluate(0.0), {4: 111.0, 5: 90.0})
+        self.assertAlmostEqual(decreasing.evaluate(1.0)[4], 84.5)
         self.assertAlmostEqual(decreasing.evaluate(1.0)[5], expected_negative_peak)
-        self.assertEqual(decreasing.evaluate(2.0), {4: 68.0, 5: 94.0})
+        self.assertEqual(decreasing.evaluate(2.0), {4: 58.0, 5: 90.0})
 
     def test_action2_b1_zero_and_equal_theta_hold_tip_exactly(self) -> None:
         no_tip = build_trajectory(
             "left_fin",
             FinAction(150.0, 2.0, 0, -1),
-            121.0,
+            111.0,
             self.calibration,
         )
         for elapsed in (0.0, 0.5, 1.0, 1.999, 2.0):
-            self.assertEqual(no_tip.evaluate(elapsed)[5], 94.0)
+            self.assertEqual(no_tip.evaluate(elapsed)[5], 90.0)
 
         equal = build_trajectory(
             "left_fin",
-            FinAction(121.0, 2.0, 1, -1),
-            121.0,
+            FinAction(111.0, 2.0, 1, -1),
+            111.0,
             self.calibration,
         )
         for elapsed in (0.0, 0.5, 1.0, 1.999, 2.0):
-            self.assertEqual(equal.evaluate(elapsed), {4: 121.0, 5: 94.0})
+            self.assertEqual(equal.evaluate(elapsed), {4: 111.0, 5: 90.0})
 
     def test_action3_formula_is_not_mirrored(self) -> None:
         positive = build_trajectory(
@@ -204,16 +227,37 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             143.0,
             self.calibration,
         )
-        self.assertAlmostEqual(positive.tip_peak_angle_deg, 90.0 + 43.0)
-        self.assertAlmostEqual(negative.tip_peak_angle_deg, 90.0 - 43.0)
+        self.assertAlmostEqual(positive.tip_peak_angle_deg, 135.0)
+        self.assertAlmostEqual(negative.tip_peak_angle_deg, 45.0)
         self.assertEqual(positive.evaluate(0.0), {6: 143.0, 7: 90.0})
         self.assertAlmostEqual(positive.evaluate(1.0)[6], 169.5)
-        self.assertAlmostEqual(positive.evaluate(1.0)[7], 133.0)
+        self.assertAlmostEqual(positive.evaluate(1.0)[7], 135.0)
         self.assertEqual(negative.evaluate(0.0), {6: 143.0, 7: 90.0})
         self.assertAlmostEqual(negative.evaluate(1.0)[6], 116.5)
-        self.assertAlmostEqual(negative.evaluate(1.0)[7], 47.0)
+        self.assertAlmostEqual(negative.evaluate(1.0)[7], 45.0)
         self.assertEqual(positive.evaluate(2.0), {6: 196.0, 7: 90.0})
         self.assertEqual(negative.evaluate(2.0), {6: 90.0, 7: 90.0})
+
+    def test_full_fin_root_travel_reaches_zero_or_180_tip_peak(self) -> None:
+        """左右根部完整移动 106° 时，尖端按 b2 到达对应机械端点。"""
+
+        cases = (
+            ("left_fin", 58.0, FinAction(164.0, 4.0, 1, 1), 5, 180.0),
+            ("left_fin", 164.0, FinAction(58.0, 4.0, 1, -1), 5, 0.0),
+            ("right_fin", 90.0, FinAction(196.0, 4.0, 1, 1), 7, 180.0),
+            ("right_fin", 196.0, FinAction(90.0, 4.0, 1, -1), 7, 0.0),
+        )
+        for sequence_name, previous, action, tip_id, expected_peak in cases:
+            with self.subTest(sequence_name=sequence_name, b2=action.b2):
+                trajectory = build_trajectory(
+                    sequence_name,
+                    action,
+                    previous,
+                    self.calibration,
+                )
+                self.assertEqual(trajectory.tip_peak_angle_deg, expected_peak)
+                self.assertEqual(trajectory.evaluate(1.0)[tip_id], expected_peak)
+                self.assertEqual(trajectory.evaluate(3.0)[tip_id], expected_peak)
 
     def test_action3_root_limits_equal_hold_and_b1_zero(self) -> None:
         for theta in (90.0, 196.0):
@@ -255,7 +299,7 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             self.assertEqual(no_tip.evaluate(elapsed)[7], 90.0)
 
     def test_fin_flags_duration_and_root_limits_are_strict(self) -> None:
-        for theta in (68.0, 174.0):
+        for theta in (58.0, 164.0):
             mission = DiscreteAbsoluteMission(
                 "left_root_boundary",
                 (),
@@ -265,14 +309,14 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             validate_mission(mission, self.calibration)
 
         bad_actions = (
-            FinAction(121.0, 0.0, 0, 1),
-            FinAction(121.0, -1.0, 0, 1),
-            FinAction(121.0, 1.0, 2, 1),
-            FinAction(121.0, 1.0, True, 1),
-            FinAction(121.0, 1.0, 0, 0),
-            FinAction(121.0, 1.0, 0, True),
-            FinAction(67.999, 1.0, 0, 1),
-            FinAction(174.001, 1.0, 0, 1),
+            FinAction(111.0, 0.0, 0, 1),
+            FinAction(111.0, -1.0, 0, 1),
+            FinAction(111.0, 1.0, 2, 1),
+            FinAction(111.0, 1.0, True, 1),
+            FinAction(111.0, 1.0, 0, 0),
+            FinAction(111.0, 1.0, 0, True),
+            FinAction(57.999, 1.0, 0, 1),
+            FinAction(164.001, 1.0, 0, 1),
         )
         for action in bad_actions:
             mission = DiscreteAbsoluteMission("bad", (), (action,), ())
@@ -281,8 +325,8 @@ class DiscreteActions20260725Tests(unittest.TestCase):
 
     def test_fin_flags_reject_float_equivalents(self) -> None:
         for action in (
-            FinAction(121.0, 1.0, 1.0, 1),
-            FinAction(121.0, 1.0, 0, -1.0),
+            FinAction(111.0, 1.0, 1.0, 1),
+            FinAction(111.0, 1.0, 0, -1.0),
         ):
             mission = DiscreteAbsoluteMission("float_flag", (), (action,), ())
             with self.assertRaises(MissionValidationError):
@@ -298,12 +342,12 @@ class DiscreteActions20260725Tests(unittest.TestCase):
         mission = DiscreteAbsoluteMission(
             "bad_peak",
             (),
-            (FinAction(174.0, 2.0, 1, 1),),
+            (FinAction(164.0, 2.0, 1, 1),),
             (),
         )
         with self.assertRaisesRegex(
             MissionValidationError,
-            r"动作组=left_fin.*动作索引=0.*previous theta=121.*current theta=174",
+            r"动作组=left_fin.*动作索引=0.*previous theta=111.*current theta=164",
         ):
             validate_mission(mission, calibration)
 
@@ -341,6 +385,42 @@ class DiscreteActions20260725Tests(unittest.TestCase):
         )
         with self.assertRaisesRegex(MissionValidationError, "2号舵机目标角=125"):
             validate_mission(mission, calibration)
+
+
+class FinTipMotionTiming20260725Tests(unittest.TestCase):
+    """锁定 5、7 号尖端舵机的新四分之一往返时序。"""
+
+    def test_tip_uses_quarter_transitions_and_exact_middle_hold(self) -> None:
+        """尖端仅在首尾四分之一运动，中间二分之一精确保持峰值。"""
+
+        for peak, transition_midpoint in ((180.0, 135.0), (0.0, 45.0)):
+            with self.subTest(peak=peak):
+                samples = {
+                    elapsed: evaluate_fin_tip_motion(90.0, peak, elapsed, 4.0)
+                    for elapsed in (
+                        0.0,
+                        0.25,
+                        0.5,
+                        1.0,
+                        2.0,
+                        3.0,
+                        3.5,
+                        3.75,
+                        4.0,
+                    )
+                }
+                smooth_quarter = 90.0 + (
+                    peak - 90.0
+                ) * quintic_smoothstep(0.25)
+                self.assertEqual(samples[0.0], 90.0)
+                self.assertAlmostEqual(samples[0.25], smooth_quarter)
+                self.assertEqual(samples[0.5], transition_midpoint)
+                self.assertEqual(samples[1.0], peak)
+                self.assertEqual(samples[2.0], peak)
+                self.assertEqual(samples[3.0], peak)
+                self.assertEqual(samples[3.5], transition_midpoint)
+                self.assertAlmostEqual(samples[3.75], smooth_quarter)
+                self.assertEqual(samples[4.0], 90.0)
 
 
 if __name__ == "__main__":

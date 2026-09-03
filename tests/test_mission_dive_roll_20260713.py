@@ -172,7 +172,7 @@ class DiveRollValidationTests(DiveRollTestCase):
             config,
             [
                 "--root-amplitude-ratio", "1",
-                "--dive-pectoral-tilt", "86",
+                "--dive-pectoral-tilt", "90",
                 "--tail-left-amplitude-deg", "30",
                 "--tail-right-amplitude-deg", "30",
             ],
@@ -182,7 +182,7 @@ class DiveRollValidationTests(DiveRollTestCase):
 
         self.assertNotIn("max_test_amplitude_deg", targets)
         self.assertEqual(targets["dive_pose_by_servo_id"][5], 180.0)
-        self.assertEqual(targets["dive_pose_by_servo_id"][7], 4.0)
+        self.assertEqual(targets["dive_pose_by_servo_id"][7], 0.0)
         for servo_id in mission.TAIL_SERVO_IDS:
             self.assertEqual(
                 targets["tail"][servo_id]["left_target"],
@@ -204,15 +204,15 @@ class DiveRollValidationTests(DiveRollTestCase):
         )
 
     def test_dive_tilt_just_outside_tip_limits_is_rejected_preflight(self) -> None:
-        args = self.make_args("--dive-pectoral-tilt", "86.1")
+        args = self.make_args("--dive-pectoral-tilt", "90.1")
         mission._validate_scalar_args(args)
         with self.assertRaises(SystemExit) as caught:
             mission._prepare_targets(self.config, args)
         message = str(caught.exception)
         self.assertIn("servo_id=5", message)
-        self.assertIn("--dive-pectoral-tilt=86.100", message)
+        self.assertIn("--dive-pectoral-tilt=90.100", message)
         self.assertIn("calculated target=180.100", message)
-        self.assertIn("8.000..180.000", message)
+        self.assertIn("0.000..180.000", message)
 
     def test_invalid_dive_duration_tilt_and_transition_are_rejected(self) -> None:
         invalid_cases = (

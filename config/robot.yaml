@@ -240,7 +240,7 @@ discrete_action_coupling:
 
 # 20260725 人工绝对离散动作的独立数学标定。
 # 七路参考中位直接复用上方 servo.channels.center_angle：
-# 85/95/95/121/94/143/90，避免维护两套含义相同的字段。
+# 85/95/95/111/90/143/90，避免维护两套含义相同的字段。
 # 本段的参考跨度只用于根部位移到尖端峰值的映射，不替代机械限位。
 discrete_absolute_actions_20260725:
   tail:
@@ -250,12 +250,12 @@ discrete_absolute_actions_20260725:
     root_servo_id: 4
     tip_servo_id: 5
     root_reference_span_deg: 106.0
-    tip_reference_span_deg: 82.0
+    tip_reference_span_deg: 90.0
   right_fin:
     root_servo_id: 6
     tip_servo_id: 7
     root_reference_span_deg: 106.0
-    tip_reference_span_deg: 82.0
+    tip_reference_span_deg: 90.0
 
 safety:
   min_voltage_v: 10.5

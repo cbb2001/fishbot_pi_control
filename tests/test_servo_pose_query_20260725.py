@@ -25,7 +25,7 @@ class ServoPoseQuery20260725Tests(unittest.TestCase):
         mission = DiscreteAbsoluteMission(
             "pose",
             (TailAction(10.0, 1.0), TailAction(10.0, 1.0)),
-            (FinAction(174.0, 2.0, 1, 1),),
+            (FinAction(164.0, 2.0, 1, 1),),
             (FinAction(143.0, 1.0, 1, -1),),
         )
         self.scheduler = ActionScheduler(mission, self.calibration)
@@ -56,18 +56,31 @@ class ServoPoseQuery20260725Tests(unittest.TestCase):
         self.assertAlmostEqual(pose["reference_angles_deg"][1], expected)
         self.assertNotAlmostEqual(pose["reference_angles_deg"][1], 87.5)
 
-    def test_fin_tip_is_center_peak_center_at_zero_half_end(self) -> None:
+    def test_fin_tip_reaches_peak_at_quarter_and_holds_until_three_quarters(
+        self,
+    ) -> None:
         start_pose = self.tracker.get_servo_pose_at(self.start).data
+        quarter_pose = self.tracker.get_servo_pose_at(
+            self.start + 500_000_000
+        ).data
         half_pose = self.tracker.get_servo_pose_at(
             self.start + 1_000_000_000
+        ).data
+        three_quarters_pose = self.tracker.get_servo_pose_at(
+            self.start + 1_500_000_000
         ).data
         end_pose = self.tracker.get_servo_pose_at(
             self.start + 2_000_000_000
         ).data
-        expected_peak = 94.0 + 53.0 / 106.0 * 86.0
-        self.assertEqual(start_pose["reference_angles_deg"][5], 94.0)
+        expected_peak = 135.0
+        self.assertEqual(start_pose["reference_angles_deg"][5], 90.0)
+        self.assertEqual(quarter_pose["reference_angles_deg"][5], expected_peak)
         self.assertAlmostEqual(half_pose["reference_angles_deg"][5], expected_peak)
-        self.assertEqual(end_pose["reference_angles_deg"][5], 94.0)
+        self.assertEqual(
+            three_quarters_pose["reference_angles_deg"][5],
+            expected_peak,
+        )
+        self.assertEqual(end_pose["reference_angles_deg"][5], 90.0)
         self.assertAlmostEqual(half_pose["left_tip_peak_angle_deg"], expected_peak)
 
     def test_equal_theta_second_action_holds_exact_angle_for_full_duration(self) -> None:
