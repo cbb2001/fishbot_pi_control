@@ -22,7 +22,7 @@ class MS5837:
         self.i2cbus = smbus.SMBus(bus)
         self.i2c_addr = addr
         self.c = [0] * 7
-        self.surface_pressure_mbar = 1144.0
+        self.surface_pressure_mbar = 1038.131
         self.temperature_C = 0.0
         self.pressure_mbar = 0.0
         self.depth_cm = 0.0

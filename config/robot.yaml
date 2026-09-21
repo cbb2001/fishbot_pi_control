@@ -83,7 +83,7 @@ depth_sensor:
   i2c_address_7bit: 0x76
   i2c_write_address_8bit: 0xEC
   i2c_read_address_8bit: 0xED
-  surface_pressure_mbar: 1144.0
+  surface_pressure_mbar: 1037 #1036 #1038.131 # 固定压力参考，单位 mbar；PPO直接使用此值，启动时不再压力标定。
 
 uart:
   uwb_port: /dev/ttyAMA0

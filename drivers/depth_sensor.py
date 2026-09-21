@@ -20,7 +20,7 @@ class DepthSensor:
         self.model = str(depth_config.get("model", "MS5837")).upper()
         self.bus = int(i2c_config.get("bus", 1))
         self.address = int(depth_config.get("i2c_address_7bit", i2c_config.get("depth_sensor_address", 0x76)))
-        self.surface_pressure_mbar = float(depth_config.get("surface_pressure_mbar", 1144.0))
+        self.surface_pressure_mbar = float(depth_config.get("surface_pressure_mbar", 1038.131))
         self._sensor = None
 
     def probe(self) -> bool:

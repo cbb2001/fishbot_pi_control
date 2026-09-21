@@ -111,7 +111,8 @@ class INA219:
       self.i2cbus.write_i2c_block_data(self.i2c_addr, register, [value >> 8, value & 0xff])
   
   def _read_register(self, register):
-      return self.i2cbus.read_i2c_block_data(self.i2c_addr, register) 
+      # INA219 寄存器为 16 位；smbus2 必须显式提供读取长度（字节）。
+      return self.i2cbus.read_i2c_block_data(self.i2c_addr, register, 2)
   
   def get_bus_voltage_V(self):
       '''!

@@ -9,9 +9,12 @@ from control.runtime.sensor_manager import SENSOR_NAMES, sensor_config
 
 
 class SensorSynchronizer:
-    def __init__(self, buffers: dict[str, RingBuffer], config: dict[str, Any]) -> None:
+    def __init__(self, buffers: dict[str, RingBuffer], config: dict[str, Any], *,
+                 enforce_data_freshness: bool = True) -> None:
         self.buffers = buffers
         self.config = config
+        # 仅 RL 显式传入关闭；其他采集/人工控制调用保持原有超时语义。
+        self.enforce_data_freshness = enforce_data_freshness
         self.start_ns = time.monotonic_ns()
 
     def build(self, t_ns: int | None = None) -> dict[str, Any]:
@@ -61,8 +64,8 @@ class SensorSynchronizer:
         age_ns = max(0, now_ns - sample.t_ns)
         timeout_ns = int(float(cfg.get("timeout_ms", 1000)) * 1_000_000)
         error = sample.error
-        valid = bool(sample.ok) and age_ns <= timeout_ns
-        if age_ns > timeout_ns:
+        valid = bool(sample.ok)
+        if self.enforce_data_freshness and age_ns > timeout_ns:
             valid = False
             error = error or "stale"
 

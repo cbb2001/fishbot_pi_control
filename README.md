@@ -2,7 +2,9 @@
 
 树莓派机器鱼控制与数据采集项目。当前阶段的重点是：在树莓派 5 Debian Trixie Lite 上稳定采集多传感器数据，保存本地日志，并为后续预设动作实验、运动学建模和水动力学建模提供统一时间戳的数据。
 
-当前阶段不是强化学习，不是完整闭环控制，也不是在线遥控机器人。默认入口不会驱动舵机，不会运行 gait，不会调用 RL policy，也不会默认输出 PCA9685 PWM。
+默认入口用于数据采集，不会驱动舵机，不会运行 gait，不会调用 RL policy，也不会默认输出 PCA9685 PWM。
+
+侧鳍在线 PPO 使用独立入口 `scripts/train_rl_ppo_20260914.py`，动作定义、交替约束、实物启动与调参方法见 [侧鳍在线 PPO 说明](README_RL_20260914.md)。
 
 ## 首先确认树莓派当前 IP
 
@@ -248,8 +250,19 @@ sudo systemctl disable serial-getty@ttyAMA0.service
 传感器：MS5837 类深度计
 Linux 7-bit 地址：0x76
 默认采样频率：20 Hz
-当前水面压力基准：1144.0 mbar
+默认水面压力基准：1038.131 mbar（2026-09-19 感压口露出水面时实测）
 例程：scripts/test_depth_sensor.py
+```
+
+PPO 直接读取 `config/robot.yaml` 的 `depth_sensor.surface_pressure_mbar`，启动时只标定 IMU，不再自动采集压力零点。独立测试显式使用 `--zero` 时才会用当时压力覆盖该测试实例的零点。
+
+单独记录压力可运行 `scripts/record_pressure_10s_20260919.py`（保留原文件名）：初始化深度传感器后立即以20Hz记录30秒并自动退出，默认不等待、不标定压力、不控制舵机。结果写入 `logs/pressure_20260919/<时间戳>/pressure.csv`，包含时间、压力Pa/mbar和温度；`summary.json` 保存完成状态、采样数和统计值。等待和时长分别可用 `--wait-s`（默认0）、`--duration-s`（默认30）修改。
+
+在树莓派项目目录启动后台记录，断开 SSH 后仍继续：
+
+```bash
+mkdir -p logs
+nohup /usr/bin/python3 -u scripts/record_pressure_10s_20260919.py > logs/pressure_record_launcher.out 2>&1 < /dev/null &
 ```
 
 注意：

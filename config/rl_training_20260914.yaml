@@ -1,0 +1,108 @@
+﻿# 侧鳍 Fin-only PPO；尾部1/2/3舵机不参与训练。
+# action2 固定18种基础动作：theta=[-53,0,53]，t=[0.3,0.6]，模式=(0,0)/(1,-1)/(1,1)。
+# b1 从0开始交替；仅 b1=1 且 theta改变时记方向 sign(delta_theta)*b2，前进/后退交替。
+# 规则由 rl_actions_20260914.py 实现，PPO 使用动态合法动作掩码；旧模型不能 --resume。
+targets:
+  depth_m: 0.3             # 目标深度 m；相对 robot.yaml 中的固定压力参考，--h0 可覆盖
+  heading_deg: 0.0         # 相对本次标定初始朝向的 yaw，--theta0 可覆盖
+startup:
+  pretrain_wait_s: 20.0    # 启动传感器后等待；这一阶段不会初始化舵机
+  sensor_warmup_s: 5.0     # 额外预热时间；健康监测持续运行
+  calibration_window_s: 5.0 # 只标定 IMU 姿态与去重力；不再标定压力
+  calibration_timeout_s: 30.0 # 从开始标定计时；失败退出，不进入运动
+calibration:
+  # 压力参考统一读取 robot.yaml 的 depth_sensor.surface_pressure_mbar（1038.131mbar）。
+  minimum_imu_samples: 200 # 窗口内最少 IMU 样本；与采样频率/窗口配合
+  max_angle_std_deg: 1.0   # pitch/yaw/roll 各自的最大标准差，超过则重试
+  water_density_kg_m3: 1000.0 # 淡水；盐水需按实际密度调整
+  gravity_mps2: 9.80665    # 重力加速度，用于去重力和压力换算
+state:
+  # 历史窗口保存最近 N 个已完成动作，不是传感器帧数，也不是 rollout 长度。
+  # 可先比较 N=8/12/16；建议起点12。网络输入=15+5*N+3维，修改N需新开训练。
+  # 末3维独立保存上一theta、下一b1、上次有效方向，跨更新/episode保留。
+  enforce_data_freshness: false # 数据超时只记录、不停车：涵盖 IMU/压力/电源/状态/决策及标定末样本年龄
+  fin_history_length: 12       # 保留最近12个已完成动作（78维输入）；与8条更新间隔独立
+  normalized_clip: 10.0    # 归一化后各维裁剪范围 ±10
+  sample_hz: 30.0          # 独立 RL 状态构建频率
+  max_state_age_ms: 150.0  # 总开关 false 时仅用于记录状态/决策年龄告警
+  stop_on_stale_decision: true # 仅总开关为 true 时生效；true 拦截过期决策
+  sensor_age:
+    # 总开关 false 时仅作年龄诊断；true 时超过 fault_ms 才因数据年龄停车。
+    imu: {warn_ms: 75.0, fault_ms: 100.0}
+    depth: {warn_ms: 225.0, fault_ms: 300.0}
+    power: {warn_ms: 1500.0, fault_ms: 2000.0}
+reward:
+  depth_weight: 4.0        # 深度奖励权重；以下四项加权求和
+  heading_weight: 1.0     # 朝向奖励权重
+  pitch_weight: 0.5       # 俯仰稳定奖励权重
+  roll_weight: 0.5        # 横滚稳定奖励权重
+  depth_scale_m: 0.30     # 高斯奖励误差尺度；越小越严格，与达标容差独立
+  heading_scale_deg: 15.0 # 朝向误差尺度，度
+  pitch_scale_deg: 10.0   # 俯仰误差尺度，度
+  roll_scale_deg: 10.0    # 横滚误差尺度，度
+fin_ppo:
+  # 当前采用8条更新的配套配置：
+  # training.update_every_actions=8、minibatch_size=8、min_transitions_per_update=8。
+  # update_epochs=3时，同一批8条样本通常优化3步；仍只采集8个动作，不是24个。
+  # 当前target_kl已注释，未启用KL提前停止；取消下方注释可启用0.03阈值。
+  # 当前checkpoint严格校验PPO配置，修改这些参数后不能直接恢复原checkpoint。
+  actor_hidden_sizes: [64, 64] # 策略网络各隐藏层宽度，树莓派优先小网络
+  critic_hidden_sizes: [64, 64] # 价值网络各隐藏层宽度
+  activation: tanh        # 激活函数
+  learning_rate: 0.0001   # Adam 学习率；小 rollout 不宜激进增大
+  gamma: 0.99            # 启用时间折扣时对应training.discount_reference_dt_s，不随更新间隔改动
+  gae_lambda: 0.95       # GAE 偏差/方差折中
+  clip_ratio: 0.15       # PPO 概率比裁剪范围 1±clip_ratio
+  entropy_coef: 0.01     # 合法动作分布的探索熵系数；熵也随当前合法动作数量变化
+  value_coef: 0.5        # 价值损失权重
+  max_grad_norm: 0.5     # 梯度范数上限
+  minibatch_size: 8      # 每个优化步使用整批8条样本；与update_every_actions配套
+  update_epochs: 3       # 同一rollout最多学习3轮；每轮步数=向上取整(样本数/minibatch_size)
+  min_transitions_per_update: 8 # 不足8条不更新；须<=update_every_actions，不触发提前更新
+  # target_kl: 0.03        # 检测到KL超限时结束本轮剩余优化，随后继续采集动作和训练
+  # target_kl省略或设null表示关闭；它不是舵机停车阈值，也不结束整个训练。
+training:
+  # 建议起点N=8：纯动作时长约2.4～4.8秒，另加采样/更新等等待；后续可比较16。
+  # 偶数N使连续样本中b1=0/1数量相同；theta不变不记方向，因此4动作不保证完整方向周期。
+  # 当前入口在episode末尾丢弃不足N条的尾批，不跨episode拼批。
+  update_every_actions: 8   # 收集8条已完成且有动作后观测的transition后更新；b1/方向跨批保留
+  update_hold_mode: endpoint # 更新期间保持最后动作终点
+  episode_duration_s: 60.0  # 每个episode墙钟上限，含PPO等待；正式训练可先60秒，10秒主要验证流程
+  max_episodes: 5        # 总 episode 数；初次实物测试建议 CLI 设为 1
+  max_training_s: 300.0    # 总训练上限300秒，仍受max_episodes约束；不含启动标定/回中，当前动作/更新允许收尾
+  success_enabled: true    # 启用深度与朝向同时达标提前结束
+  depth_tolerance_m: 0.05  # 深度达标绝对误差 m
+  yaw_tolerance_deg: 5.0   # 朝向达标误差，按 ±180° 环绕
+  success_hold_s: 2.0      # 同时达标持续时间
+  min_episode_s: 2.0       # 最早允许成功结束的时间
+  min_actions: 1           # 成功结束前至少完成多少动作
+  max_sample_gap_s: 0.2    # 达标证据允许的最大时间断档
+  stop_after_success: false # true 表示成功后结束整次训练，false 开始下一 episode
+  time_aware_discount: true # 根据动作持续时间调整 gamma 和 lambda
+  discount_reference_dt_s: 0.3 # 时间折扣参考时长，秒
+  checkpoint_every_updates: 5 # 每发布 N 次更新保存；0 禁用该周期保存
+  checkpoint_on_episode_end: true # episode 结束保存
+  checkpoint_on_policy_publish: false # 每次策略发布保存；SD 卡写入更频繁
+  checkpoint_on_exit: true # 退出时保存已发布策略，不保存未完成更新
+# 默认继承 robot.yaml 的 min_voltage_v=10.5、max_current_a=10.0、max_depth_m=5.0。
+# 可在本段覆盖对应项；深度上限必须按水池和试验范围设定，不能直接把 5m 当水池许可。
+# 例如将下行改为 safety: {max_depth_m: 0.8}，仅当该上限适合你的试验环境。
+safety: {}
+runtime:
+  torch_num_threads: 1    # 实际调用 torch.set_num_threads，给采样/控制线程留出 CPU
+  poll_interval_s: 0.01   # 主循环轮询间隔，秒
+  safety_poll_interval_s: 0.01 # 独立健康监测周期；不是传感器采样频率/硬实时保证
+  update_timeout_s: 2.0   # PPO 更新超时则取消并触发故障停止
+  action_timeout_margin_s: 1.0 # 动作时长之外允许的完成回执等待时间
+  sensor_ready_timeout_s: 5.0 # 首个样本/首个状态最长等待；样本无效不享受宽限
+  shutdown_timeout_s: 10.0 # 每项线程清理等待上限；超时记录而非静默忽略
+  decision_latency_warn_ms: 50.0 # 保留字段；实际决策年龄诊断使用 max_state_age_ms
+  live_status_interval_s: 1.0 # 状态文件最小发布间隔；主循环服务时更新
+  console_status_interval_s: 5.0 # 保留字段；入口目前仅结束时打印总结
+simulation:
+  # 仅 --dry-run 使用，覆盖启动/标定参数；传感器和舵机均模拟。
+  pretrain_wait_s: 0.0
+  sensor_warmup_s: 0.1
+  calibration_window_s: 0.5
+  calibration_timeout_s: 5.0
+  minimum_imu_samples: 30

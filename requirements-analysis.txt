@@ -1,0 +1,4 @@
+# Windows 本地离线绘图依赖；不需要安装树莓派硬件驱动。
+numpy>=1.24
+matplotlib>=3.7
+PyYAML>=6.0
