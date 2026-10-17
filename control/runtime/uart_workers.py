@@ -438,7 +438,17 @@ class IMUWorker(BaseSensorWorker):
                 pass
 
 
+UWB_LINE_DELIMITER = b"\r\n"
+UWB_MAX_READ_BYTES = 4096
+
+
+def read_uwb_chunk(serial_port) -> bytes:
+    """UWB统一按CRLF读取；上限防止超长输入，超时片段交给流式解析器保留。"""
+    return serial_port.read_until(UWB_LINE_DELIMITER, size=UWB_MAX_READ_BYTES)
+
+
 class UWBWorker(BaseSensorWorker):
+    """公共UWB采集线程；导航、诊断及其他SensorManager入口共用。"""
     def __init__(
         self,
         buffer: RingBuffer,
@@ -465,7 +475,7 @@ class UWBWorker(BaseSensorWorker):
 
     def read_once(self) -> SensorSample | None:
         serial_port = self._ensure_serial()
-        data = serial_port.read(256)
+        data = read_uwb_chunk(serial_port)
         if not data:
             now_s = time.monotonic()
             if now_s - self._last_invalid_s < self.invalid_interval_s:

@@ -254,7 +254,7 @@ Linux 7-bit 地址：0x76
 例程：scripts/test_depth_sensor.py
 ```
 
-PPO 直接读取 `config/robot.yaml` 的 `depth_sensor.surface_pressure_mbar`，启动时只标定 IMU，不再自动采集压力零点。独立测试显式使用 `--zero` 时才会用当时压力覆盖该测试实例的零点。
+PPO 采用10Hz压力漂移修正，启动默认5秒窗口同时标定 IMU 与 `P0=mean(P-f(t))`，控制深度为 `(P-P0-f(t))/(rho*g)`，不使用这里的驱动固定参考。详见 `README_RL_20260914.md`。独立测试显式使用 `--zero` 时会用当时压力覆盖该测试实例的零点。
 
 单独记录压力可运行 `scripts/record_pressure_10s_20260919.py`（保留原文件名）：初始化深度传感器后立即以20Hz记录30秒并自动退出，默认不等待、不标定压力、不控制舵机。结果写入 `logs/pressure_20260919/<时间戳>/pressure.csv`，包含时间、压力Pa/mbar和温度；`summary.json` 保存完成状态、采样数和统计值。等待和时长分别可用 `--wait-s`（默认0）、`--duration-s`（默认30）修改。
 

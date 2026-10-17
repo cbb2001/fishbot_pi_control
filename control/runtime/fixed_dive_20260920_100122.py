@@ -1,4 +1,4 @@
-"""固定下潜策略；复用 PPO 的 action2 轨迹及执行器，不加载训练网络。
+"""固定深度双向 PI 策略；复用 PPO 的 action2 轨迹及执行器，不加载训练网络。
 
 用户公式中的 theta1/theta2 是绝对角度；FinAction.theta 仍为相对中位偏移。
 正常深度越界只在整组结束时决策，故障/停止信号仍可立即停车。
@@ -21,8 +21,9 @@ from .rl_sensor_calibration_20260914 import finite_float, wait_for_calibration
 
 class FixedDepthCalibration:
     """固定策略专用经验换算；IMU 标定仍复用原接口，PPO 不受影响。"""
-    def __init__(self, calibration, pressure_per_meter):
+    def __init__(self, calibration, pressure_per_meter, drift=None):
         self.calibration = calibration
+        self.drift = drift
         self.pressure_per_meter = finite_float(pressure_per_meter, 'pressure_per_meter')
         if self.pressure_per_meter <= 0:
             raise ValueError('pressure_per_meter 必须大于0（Pa/m）')
@@ -31,9 +32,18 @@ class FixedDepthCalibration:
         return (finite_float(pressure_pa, 'pressure_pa')-self.calibration.p_surface_pa)/self.pressure_per_meter
 
     def state_dict(self):
-        return {**self.calibration.state_dict(), 'depth_conversion': 'linear_pressure',
+        result = {**self.calibration.state_dict(), 'depth_conversion': 'linear_pressure',
                 'pressure_per_meter': self.pressure_per_meter,
                 'depth_formula': '(pressure_pa - p_surface_pa) / pressure_per_meter'}
+        if self.drift is not None:
+            result.update(depth_conversion='pressure_drift_lookup',
+                          depth_formula='(raw_pressure_pa - p_surface_pa - f(elapsed_s)) / pressure_per_meter',
+                          pressure_drift_file='pressure_drift.json',
+                          pressure_drift_origin_t_ns=self.drift.origin_t_ns,
+                          pressure_drift_calibration_id=self.drift.config.get('calibration_id'),
+                          depth_sample_rate_hz=10.,
+                          p0_estimator='manual' if self.calibration.fixed_surface_pressure_mbar is not None else 'mean(P_i - f(t_i))')
+        return result
 
 
 @dataclass(frozen=True)
@@ -80,12 +90,15 @@ class FixedDiveScheduler(RLActionScheduler):
 
 
 class FixedDivePolicy:
-    def __init__(self, calibration, *, h0, k=1., initial_b2=1, action_duration_s=.6):
-        self.h0, self.k = finite_float(h0, 'h0'), finite_float(k, 'k')
+    def __init__(self, calibration, *, h0, k=1., ki=0., initial_b2=1, action_duration_s=.6,
+                 max_integral_gap_s=.3, error_scale_m=None):
+        self.k = finite_float(k, 'k')
+        self.ki = finite_float(ki, 'ki')
+        self.max_integral_gap_s = finite_float(max_integral_gap_s, 'max_integral_gap_s')
         # 复用动作参数校验，在传感器/PWM 初始化前拒绝非法时长。
         self.action_duration_s = ContinuousFinAction(0., action_duration_s, 0, 0).t
-        if self.h0 <= 0 or self.k < 0:
-            raise ValueError('h0 必须大于 0，k 必须非负')
+        if self.k < 0 or self.ki < 0 or self.max_integral_gap_s <= 0:
+            raise ValueError('积分允许采样间隔必须大于0，k和ki必须非负')
         if type(initial_b2) is not int or initial_b2 not in (-1, 1):
             raise ValueError('initial_b2 必须为 +1/-1')
         self.calibration = calibration
@@ -100,34 +113,136 @@ class FixedDivePolicy:
         self._pair = None
         self._index = 0
         self.pair_info = None
+        # 无量纲积分输出 ki*∫((h0-h)/error_scale_m)dt；默认归一化尺度仍为h0。
+        self.i_term = 0.
+        self._control_start_ns = None
+        self._last_integral_t_ns = None
+        self.set_target(h0, error_scale_m=error_scale_m)
+        self.integral_status = 'not_started'
+
+    def set_target(self, h0, *, error_scale_m=None):
+        """仅在组边界切换目标；0米目标须显式提供正的误差尺度，避免除零。"""
+        if self.pair_active:
+            raise RuntimeError('须完成当前action2组合后才能切换目标')
+        target = finite_float(h0, 'h0')
+        scale = target if error_scale_m is None else finite_float(error_scale_m, 'error_scale_m')
+        if target < 0 or scale <= 0:
+            raise ValueError('h0必须非负，误差归一化尺度必须大于0（默认使用h0）')
+        self.h0, self.error_scale_m = target, scale
+        self.i_term = 0.
+        # 新目标不继承上一阶段的采样间隔和积分，b2交替状态则继续保留。
+        self._last_integral_t_ns = None
+        self.integral_status = 'stage_reset'
+
+    def _angle_cap(self, b2):
+        """复用原根部/鳍尖限幅，积分也必须服从这些物理限制。"""
+        c, limits = self.calibration.centers, self.calibration.limits
+        root_cap = min(*(c[s]-limits[s][0] for s in (4, 6)),
+                       *(limits[s][1]-c[s] for s in (4, 6)))
+        tip_room = min(limits[5][1]-c[5] if b2 > 0 else c[5]-limits[5][0],
+                       c[7]-limits[7][0] if b2 > 0 else limits[7][1]-c[7])
+        coupling = self.calibration.coupling
+        tip_cap = tip_room * coupling['root_reference_span_deg'] / coupling['tip_reference_span_deg'] / 2.
+        return min(root_cap, tip_cap)
+
+    def start_control(self, t_ns):
+        """预热、标定和舵机初始化期间不积分；漂移模型的时间起点不受影响。"""
+        self._control_start_ns = int(t_ns)
+        self._last_integral_t_ns = None
+        self.i_term = 0.
+        self.integral_status = 'waiting_for_sample'
+
+    def observe_depth(self, depth_m, sample_t_ns):
+        """每条新压力样本最多积分一次，矩形积分使用实际采样间隔（秒）。"""
+        depth = finite_float(depth_m, 'depth_m')
+        t_ns = int(sample_t_ns)
+        if self._control_start_ns is None or t_ns < self._control_start_ns:
+            return
+        previous = self._last_integral_t_ns
+        if previous is not None and t_ns <= previous:
+            return  # 重复/乱序样本不重复累计，也不回拨积分计时。
+        self._last_integral_t_ns = t_ns
+        if self.ki == 0:
+            self.i_term = 0.
+            self.integral_status = 'disabled'
+            return
+        if depth == self.h0 and not self.pair_active:
+            self.i_term = 0.
+            self.integral_status = 'reset_at_hold'
+            return
+        if previous is None:
+            self.integral_status = 'first_sample'
+            return
+        dt = (t_ns-previous)/1e9
+        if dt > self.max_integral_gap_s:
+            self.integral_status = 'gap_skipped'
+            return
+        error = (self.h0-depth)/self.error_scale_m
+        span = self.calibration.limits[4][1]-self.calibration.centers[4]
+        if span <= 0:
+            self.i_term = 0.
+            self.integral_status = 'no_angle_room'
+            return
+        # 两个 b2 方向均须可用；输出正负方向都做 anti-windup。
+        cap = min(self._angle_cap(1), self._angle_cap(-1))/span
+        increment = self.ki*error*dt
+        if not math.isfinite(increment):
+            raise ValueError('积分计算溢出')
+        candidate = self.i_term + increment
+        headroom = max(0., cap-self.k*abs(error))
+        unwinding = error*self.i_term < 0
+        if unwinding:
+            # 误差反向时先退积分，即使比例项已饱和也允许消除历史积分。
+            # 若一次更新跨过零点，新方向积分仍须受输出余量限制。
+            updated = (candidate if error*candidate <= 0 else
+                       math.copysign(min(abs(candidate), headroom), error))
+        else:
+            magnitude = max(abs(self.i_term), min(abs(candidate), headroom))
+            updated = math.copysign(magnitude, error) if error else self.i_term
+        self.i_term = max(-cap, min(cap, updated))
+        self.integral_status = ('anti_windup' if self.i_term != candidate else
+                                'unwinding' if unwinding else 'integrating')
+
+    def pi_state(self, depth_m):
+        span = self.calibration.limits[4][1]-self.calibration.centers[4]
+        return {'ki': self.ki, 'target_depth_m': self.h0, 'error_scale_m': self.error_scale_m,
+                'p_term_deg': self.k*((depth_m-self.h0)/self.error_scale_m)*span,
+                'i_term_deg': -self.i_term*span, 'integral_status': self.integral_status}
 
     def next_action(self, depth_m):
         depth = finite_float(depth_m, 'depth_m')
         if self._pair is None:
-            if depth >= self.h0:
+            if depth == self.h0:
+                self.i_term = 0.
+                self.integral_status = 'reset_at_hold' if self.ki else 'disabled'
                 return None  # 达到目标时不提交动作，执行器保持已确认的最后姿态。
-            c, limits = self.calibration.centers, self.calibration.limits
-            span = limits[4][1] - c[4]
-            # 严格保留用户公式的负号：浅于目标且 k>0 时 delta 为负。
-            delta_raw = self.k * ((depth-self.h0)/self.h0) * span
+            # 仅在组边界清除与当前误差相反的旧积分，避免越过目标后继续朝旧方向拍动。
+            # 组内仍按采样退积分，已冻结的两个动作不受影响。
+            if self.i_term*(self.h0-depth) < 0:
+                self.i_term = 0.
+                self.integral_status = 'direction_reset'
+            c = self.calibration.centers
+            # 深度低于目标时 delta 为负（下潜），高于目标时 delta 为正（上浮）。
+            terms = self.pi_state(depth)
+            delta_raw = terms['p_term_deg'] + terms['i_term_deg']
             if not math.isfinite(delta_raw):
                 raise ValueError('delta 计算溢出')
             # 同时约束两根部和左右鳍尖；缩小幅值，不裁剪轨迹，保持耦合定义。
-            root_cap = min(c[s]-limits[s][0] for s in (4, 6))
-            root_cap = min(root_cap, *(limits[s][1]-c[s] for s in (4, 6)))
             b2 = self.next_b2
-            tip_room = min(limits[5][1]-c[5] if b2 > 0 else c[5]-limits[5][0],
-                           c[7]-limits[7][0] if b2 > 0 else limits[7][1]-c[7])
-            coupling = self.calibration.coupling
-            tip_cap = tip_room * coupling['root_reference_span_deg'] / coupling['tip_reference_span_deg'] / 2.
-            delta = -min(abs(delta_raw), root_cap, tip_cap)
+            angle_cap = self._angle_cap(b2)
+            delta = math.copysign(min(abs(delta_raw), angle_cap), delta_raw) if delta_raw else 0.
+            if delta == 0:
+                self.integral_status = 'zero_output'
+                return None
             self._pair = (ContinuousFinAction(delta, self.action_duration_s, 0, 0),
                           ContinuousFinAction(-delta, self.action_duration_s, 1, b2))
             self._index = 0
-            self.pair_info = {'pair_index': self.completed_pairs, 'depth_at_start_m': depth,
+            self.pair_info = {**terms, 'pair_index': self.completed_pairs, 'depth_at_start_m': depth,
                               'delta_raw_deg': delta_raw, 'delta_deg': delta,
                               'theta1_absolute_deg': c[4]+delta,
                               'theta2_absolute_deg': c[4]-delta, 'b2': b2,
+                              'direction': 'diving' if delta < 0 else 'surfacing',
+                              'angle_cap_deg': angle_cap, 'saturated': abs(delta_raw) >= angle_cap,
                               'limited': delta != delta_raw, 'action_duration_s': self.action_duration_s}
         # 本组中途的深度变化不重算角度、不取消第二动作。
         return self._pair[self._index]
@@ -150,9 +265,10 @@ class FixedDivePolicy:
         return self._pair is not None
 
 
-def prepare_fixed_config(raw, *, dry_run=False, pretrain_wait_s=None):
+def prepare_fixed_config(raw, *, dry_run=False, pretrain_wait_s=None, calibration_window_s=None):
     """仅提取 PPO 的采集、标定和运行配置，不依赖 Torch/PPO 超参数。"""
     cfg = copy.deepcopy(raw)
+    cfg.setdefault('startup', {}).setdefault('calibration_window_s', 5.)
     if dry_run:
         sim = cfg.get('simulation', {})
         for key in ('pretrain_wait_s', 'sensor_warmup_s', 'calibration_window_s', 'calibration_timeout_s'):
@@ -163,6 +279,11 @@ def prepare_fixed_config(raw, *, dry_run=False, pretrain_wait_s=None):
                 cfg['calibration'][key] = sim[key]
     if pretrain_wait_s is not None:
         cfg['startup']['pretrain_wait_s'] = pretrain_wait_s
+    if calibration_window_s is not None:
+        cfg['startup']['calibration_window_s'] = calibration_window_s
+        # 显式加长模拟窗口时，保留实机的重试预算，避免5秒窗口与5秒超时重合。
+        if dry_run:
+            cfg['startup']['calibration_timeout_s'] = raw['startup']['calibration_timeout_s']
     for section, keys, zero_ok in (
         ('startup', ('pretrain_wait_s', 'sensor_warmup_s'), True),
         ('startup', ('calibration_window_s', 'calibration_timeout_s'), False),
@@ -174,14 +295,15 @@ def prepare_fixed_config(raw, *, dry_run=False, pretrain_wait_s=None):
             if value < 0 or (not zero_ok and value == 0):
                 raise ValueError(f'{section}.{key} 无效')
             cfg[section][key] = value
-    if cfg['startup']['calibration_timeout_s'] < cfg['startup']['calibration_window_s']:
-        raise ValueError('标定超时不得小于标定窗口')
+    if cfg['startup']['calibration_timeout_s'] <= cfg['startup']['calibration_window_s']:
+        raise ValueError('标定超时必须大于标定窗口，以留出完成检查和重试时间')
     return cfg
 
 
-def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=False,
+def run_session(cfg, robot_cfg, session, *, h0, k=1., ki=0., initial_b2=1, dry_run=False,
                 max_control_s=None, keep_pwm=False, stop_event=None, action_duration_s=.6,
-                surface_pressure_pa=None, pressure_per_meter=None):
+                surface_pressure_pa=None, pressure_per_meter=None, pressure_drift_config=None):
+    from .pressure_drift_20261001 import PressureDrift, CorrectedSensors
     from .data_logger import JsonlLogger, RawSensorLoggers, write_metadata_yaml
     from .rl_live_status_20260914 import LiveStatusPublisher
     from .rl_safety_20260914 import RLSafetyMonitor, RLSafetyFault
@@ -190,18 +312,25 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
     from .sensor_manager import SensorManager
 
     calibration = build_calibration(robot_cfg)
-    policy = FixedDivePolicy(calibration, h0=h0, k=k, initial_b2=initial_b2,
-                             action_duration_s=action_duration_s)
+    policy = FixedDivePolicy(calibration, h0=h0, k=k, ki=ki, initial_b2=initial_b2,
+                             action_duration_s=action_duration_s,
+                             max_integral_gap_s=cfg.get('state', {}).get('sensor_age', {}).get('depth', {}).get('fault_ms', 300.)/1000.)
     if max_control_s is not None:
         max_control_s = finite_float(max_control_s, 'max_control_s')
         if max_control_s <= 0:
             raise ValueError('max_control_s 必须大于 0')
     # 独立配置接口默认 null：不再隐式使用旧 robot.yaml 的固定驱动零点。
     depth_cfg = cfg.get('fixed_depth', {}) or {}
+    drift_path = pressure_drift_config or depth_cfg.get('pressure_drift_config') or (
+        Path(__file__).resolve().parents[2] / 'config/pressure_drift_10hz.json')
+    drift = PressureDrift(drift_path)
     if surface_pressure_pa is None:
         surface_pressure_pa = depth_cfg.get('surface_pressure_pa')
     if pressure_per_meter is None:
-        pressure_per_meter = depth_cfg.get('pressure_per_meter', 750.)
+        pressure_per_meter = depth_cfg.get('pressure_per_meter')
+    if pressure_per_meter is None:
+        pressure_per_meter = (finite_float(cfg['calibration'].get('water_density_kg_m3', 1000.), 'water density')
+                              * finite_float(cfg['calibration'].get('gravity_mps2', 9.80665), 'gravity'))
     pressure_per_meter = finite_float(pressure_per_meter, 'pressure_per_meter')
     if pressure_per_meter <= 0:
         raise ValueError('pressure_per_meter 必须大于0（Pa/m）')
@@ -231,6 +360,8 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
         active_servo_ids=(4, 5, 6, 7), shutdown_event=stop, failure_queue=failures,
         keep_pwm=keep_pwm, servo_id_to_channel={i: int(v['channel']) for i, v in calibration.servos.items()})
     sensor_cfg = copy.deepcopy(robot_cfg)
+    # 仅本次固定下潜会话覆盖为模型要求的 10 Hz，不修改 robot.yaml/PPO。
+    sensor_cfg.setdefault('sensors', {}).setdefault('depth', {})['rate_hz'] = 10.
     sensor_cfg['calibration'] = dict(cfg['calibration'])
     # 驱动自带 depth_m 不参与决策；兼容旧驱动不接受 null 的构造参数。
     if sensor_cfg.setdefault('depth_sensor', {}).get('surface_pressure_mbar') is None:
@@ -243,9 +374,22 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
     if dry_run:
         from .rl_mock_sensors_20260914 import MockRLSensorManager
         sensors = MockRLSensorManager(sensor_cfg, stop_event=stop, log_dir=session)
+        # 模拟原始压力包含同一漂移，确保标定/修正后仍还原模拟真实深度。
+        sensors._create_workers()
+        sensors._created = True
+        for worker in sensors.workers:
+            if worker.name == 'depth':
+                original_read = worker.read_once
+                def read_with_drift(read=original_read):
+                    sample = read()
+                    drift.observe([sample])
+                    sample.data['pressure_pa'] += drift.drift_pa(drift.elapsed_s(sample.t_ns))
+                    return sample
+                worker.read_once = read_with_drift
     else:
         sensors = SensorManager(sensor_cfg, mock=False, stop_event=stop, log_dir=session)
-    guard = RLSafetyMonitor(sensors, ex, failures, stop, cfg, robot_cfg)
+    corrected_sensors = CorrectedSensors(sensors, drift)
+    guard = RLSafetyMonitor(corrected_sensors, ex, failures, stop, cfg, robot_cfg)
     if policy.h0 >= guard.limits['max_depth_m']:
         raise ValueError('h0 必须小于配置的安全深度上限')
     logs = {name: JsonlLogger(session / name) for name in ('events.jsonl', 'commands.jsonl', 'depth_control.jsonl')}
@@ -264,7 +408,8 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
 
     def publish(force=False):
         status.publish({'phase': phase, 'depth_m': depth, 'target_depth_m': policy.h0,
-                        'k': policy.k, 'action_duration_s': policy.action_duration_s,
+                        'k': policy.k, 'ki': policy.ki, 'action_duration_s': policy.action_duration_s,
+                        'pi': None if depth is None else policy.pi_state(depth),
                         'completed_pairs': policy.completed_pairs,
                         'last_b2': policy.last_b2, 'next_b2': policy.next_b2,
                         'controlled_servo_ids': [4, 5, 6, 7],
@@ -278,13 +423,19 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
         if ex.failure is not None:
             raise ex.failure
         raw.write_from_buffers(sensors.buffers)
-        sample = sensors.buffers['depth'].latest()
+        sample = corrected_sensors.buffers['depth'].latest()
         if sensor_cal is not None and sample is not None and sample.t_ns > last_depth_t:
             if not sample.ok:
                 raise RLSafetyFault('DEPTH_INVALID', str(sample.error))
             depth = sensor_cal.depth_m(sample.data['pressure_pa'])
+            policy.observe_depth(depth, sample.t_ns)
             last_depth_t = sample.t_ns
-            write('depth_control.jsonl', {'sample_t_ns': sample.t_ns, 'depth_m': depth,
+            write('depth_control.jsonl', {**policy.pi_state(depth), 'sample_t_ns': sample.t_ns, 'depth_m': depth,
+                                        'raw_pressure_pa': sample.data['raw_pressure_pa'],
+                                        'corrected_pressure_pa': sample.data['pressure_pa'],
+                                        'pressure_drift_pa': sample.data['pressure_drift_pa'],
+                                        'drift_elapsed_s': sample.data['drift_elapsed_s'],
+                                        'surface_pressure_pa': sensor_cal.calibration.p_surface_pa + sample.data['pressure_drift_pa'],
                                         'phase': phase, 'pair_active': policy.pair_active})
         for logger in [*logs.values(), *raw.loggers.values()]:
             if logger.last_error or logger.dropped_count:
@@ -303,10 +454,13 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
             logger.start()
         raw.start()
         write_metadata_yaml(session / 'metadata.yaml', {
-            'runtime_config': cfg, 'robot_config': robot_cfg, 'dry_run': dry_run,
-            'h0': h0, 'k': k, 'initial_b2': initial_b2, 'max_control_s': max_control_s,
+            'runtime_config': cfg, 'robot_config': sensor_cfg, 'dry_run': dry_run,
+            'h0': h0, 'k': k, 'ki': ki, 'initial_b2': initial_b2, 'max_control_s': max_control_s,
+            'max_integral_gap_s': policy.max_integral_gap_s,
             'surface_pressure_pa': surface_pressure_pa, 'pressure_per_meter': pressure_per_meter,
             'action_duration_s': policy.action_duration_s})
+        # 会话保存查表快照，后续离线分析不依赖可能变化的配置文件。
+        (session / 'pressure_drift.json').write_text(json.dumps(drift.config, ensure_ascii=False), encoding='utf-8')
         sensors.start_all()
         guard.start()
         wait(cfg['startup']['pretrain_wait_s'])
@@ -316,12 +470,12 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
         cal_cfg.pop('surface_pressure_mbar', None)
         if surface_pressure_pa is not None:
             cal_cfg['surface_pressure_mbar'] = surface_pressure_pa / 100.
-        elif dry_run:
-            # 模拟标定窗口只有0.5秒、20Hz，不能要求真实模式的50个压力样本。
-            cal_cfg.setdefault('minimum_depth_samples', 5)
+        else:
+            # 10 Hz 的窗口边界可能少一条；保留原来的覆盖时长及稳定性检查。
+            cal_cfg.setdefault('minimum_depth_samples', max(3, math.floor(cfg['startup']['calibration_window_s']*10*.9)))
         merged = {**cfg, 'sensors': sensor_cfg['sensors'], 'calibration': cal_cfg}
         sensor_cal = FixedDepthCalibration(
-            wait_for_calibration(sensors, merged, stop_event=stop, on_check=service), pressure_per_meter)
+            wait_for_calibration(corrected_sensors, merged, stop_event=stop, on_check=service), pressure_per_meter, drift)
         guard.calibration = sensor_cal
         (session / 'calibration.json').write_text(json.dumps(sensor_cal.state_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
         end = time.monotonic()+cfg['runtime']['sensor_ready_timeout_s']
@@ -341,6 +495,7 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
         if dry_run:
             sensors.set_surface_mode(False)
         start = time.monotonic()
+        policy.start_control(time.monotonic_ns())
         while True:
             service()
             # 常规运行时限也等整组结束；Ctrl+C/故障不受此限制。
@@ -353,7 +508,7 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., initial_b2=1, dry_run=Fals
                     write('events.jsonl', {'event': 'hold_endpoint', 'depth_m': depth})
                 stop.wait(poll_s)  # 不用 action2 做定时保持，下一轮即可响应新深度。
                 continue
-            phase = 'diving'
+            phase = policy.pair_info['direction']
             # 在进入执行器前再次验证完整轨迹；保留原轨迹函数及镜像关系。
             validate_trajectory(build_rl_trajectory(action, scheduler.previous_theta['fin'], calibration), calibration.limits)
             rid = ex.submit('fin', action, policy.pair_info)

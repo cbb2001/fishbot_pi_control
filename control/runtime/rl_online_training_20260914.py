@@ -20,7 +20,8 @@ from .rl_ppo_agent_20260914 import FinPPOAgent
 from .rl_reward_20260914 import RLReward
 from .rl_rollout_buffer_20260914 import Transition
 from .rl_safety_20260914 import RLSafetyMonitor, RLSafetyFault
-from .rl_sensor_calibration_20260914 import wait_for_calibration, finite_float
+from .rl_sensor_calibration_20260914 import wait_for_calibration
+from .pressure_drift_20261001 import PressureDrift, CorrectedSensors, ObservedPressureBuffer
 from .rl_servo_executor_20260914 import DryRunRLServoController, RLServoExecutor
 from .rl_servo_state_tracker_20260914 import RLServoStateTracker
 from .rl_state_builder_20260914 import RLStateBuilder
@@ -38,11 +39,10 @@ def _write(logs, name, row):
 
 def run_session(cfg, robot_cfg, session, *, dry_run=False, seed=None, resume=None,
                 keep_pwm=False, stop_event=None):
-    # 独立驱动和 PPO 共用 robot.yaml 的压力参考；配置缺失时不得退回自动压力标定。
-    pressure_value = robot_cfg.get('depth_sensor', {}).get('surface_pressure_mbar')
-    fixed_surface_pressure_mbar = finite_float(pressure_value, 'depth_sensor.surface_pressure_mbar')
-    if isinstance(pressure_value, bool) or fixed_surface_pressure_mbar <= 0 or not math.isfinite(fixed_surface_pressure_mbar*100.):
-        raise ValueError('depth_sensor.surface_pressure_mbar 必须为正数')
+    drift_path = Path(cfg.get('pressure_drift', {}).get('config_path', 'config/pressure_drift_10hz.json'))
+    if not drift_path.is_absolute():
+        drift_path = Path(__file__).resolve().parents[2] / drift_path
+    drift = PressureDrift(drift_path)  # 在启动任何硬件前检查模型及覆盖范围。
     session = Path(session)
     session.mkdir(parents=True, exist_ok=True)
     stop = stop_event if stop_event is not None else threading.Event()
@@ -78,6 +78,9 @@ def run_session(cfg, robot_cfg, session, *, dry_run=False, seed=None, resume=Non
         active_servo_ids=(4, 5, 6, 7), shutdown_event=stop, failure_queue=failures,
         keep_pwm=keep_pwm, servo_id_to_channel={i: int(v['channel']) for i, v in calibration.servos.items()})
     sensor_cfg = copy.deepcopy(robot_cfg)
+    # 仅覆盖本次PPO会话，保证真实采样频率与漂移模型一致。
+    sensor_cfg['sensors'].setdefault('depth', {})['rate_hz'] = 10.
+    sensor_cfg['calibration'] = dict(cfg['calibration'])
     for name in ('vision', 'uwb'):
         sensor_cfg['sensors'].setdefault(name, {})['enabled'] = False
     if dry_run:
@@ -85,7 +88,11 @@ def run_session(cfg, robot_cfg, session, *, dry_run=False, seed=None, resume=Non
         sensors = MockRLSensorManager(sensor_cfg, stop_event=stop, log_dir=session)
     else:
         sensors = SensorManager(sensor_cfg, mock=False, stop_event=stop, log_dir=session)
-    guard = RLSafetyMonitor(sensors, ex, failures, stop, cfg, robot_cfg)
+    sensors.buffers['depth'] = ObservedPressureBuffer(sensors.buffers['depth'], drift)
+    if dry_run:
+        sensors.pressure_drift = drift  # 模拟原始压力包含同一漂移，验证补偿通路。
+    corrected_sensors = CorrectedSensors(sensors, drift)
+    guard = RLSafetyMonitor(corrected_sensors, ex, failures, stop, cfg, robot_cfg)
     names = ('events.jsonl', 'commands.jsonl', 'rl_state_20260914.jsonl', 'synchronized_sensors.jsonl',
              'fin_transitions_20260914.jsonl', 'fin_ppo_updates_20260914.jsonl',
              'policy_publish_20260914.jsonl', 'episodes_20260914.jsonl',
@@ -160,18 +167,27 @@ def run_session(cfg, robot_cfg, session, *, dry_run=False, seed=None, resume=Non
         coord = FinTrainingCoordinator(agent, cfg)
         if resume:
             next_ep = int(coord.load_checkpoint(resume)['next_episode_index'])
-        write_metadata_yaml(session / 'metadata.yaml', {'rl_config': cfg, 'robot_config': robot_cfg,
+        write_metadata_yaml(session / 'metadata.yaml', {'rl_config': cfg, 'robot_config': sensor_cfg,
                             'dry_run': dry_run, 'safety_limits': guard.limits, 'seed': seed,
                             'policy_architecture': agent.architecture(),
                             'initial_fin_sequence': scheduler.fin_sequence.to_dict()})
+        (session / 'pressure_drift.json').write_text(json.dumps(drift.config, ensure_ascii=False), encoding='utf-8')
         sensors.start_all()
         guard.start()
         wait(float(cfg['startup']['pretrain_wait_s']))
         wait(float(cfg['startup']['sensor_warmup_s']))
         phase = 'calibration'
-        merged = {**cfg, 'sensors': sensor_cfg['sensors'],
-                  'calibration': {**cfg['calibration'], 'surface_pressure_mbar': fixed_surface_pressure_mbar}}
-        sensor_cal = wait_for_calibration(sensors, merged, stop_event=stop, on_check=service)
+        cal_cfg = dict(cfg['calibration'])
+        cal_cfg.pop('surface_pressure_mbar', None)  # PPO不再使用旧的固定压力零点。
+        merged = {**cfg, 'sensors': sensor_cfg['sensors'], 'calibration': cal_cfg}
+        sensor_cal = wait_for_calibration(corrected_sensors, merged, stop_event=stop, on_check=service)
+        sensor_cal.diagnostics.update(pressure_reference_mode='drift_corrected_sample_mean',
+            p0_estimator='mean(P_i - f(t_i))', depth_sample_rate_hz=10.,
+            pressure_drift_origin_t_ns=drift.origin_t_ns,
+            pressure_drift_file='pressure_drift.json',
+            pressure_drift_calibration_id=drift.config.get('calibration_id'),
+            depth_formula='(raw_pressure_pa - p_surface_pa - f(elapsed_s)) / (rho * g)')
+        corrected_sensors.buffers['depth'].calibration = sensor_cal
         guard.calibration = sensor_cal
         (session / 'calibration_20260914.json').write_text(
             json.dumps(sensor_cal.state_dict(), ensure_ascii=False, indent=2), encoding='utf-8')
@@ -195,10 +211,10 @@ def run_session(cfg, robot_cfg, session, *, dry_run=False, seed=None, resume=Non
         if dry_run:
             sensors.set_surface_mode(False)
         statebuf = RLStateBuffer()
-        builder = RLStateBuilder(sensors, sensor_cal, tracker, merged, reward=RLReward(cfg))
+        builder = RLStateBuilder(corrected_sensors, sensor_cal, tracker, merged, reward=RLReward(cfg))
         sync = RLStateSyncWorker(builder, statebuf, rate_hz=cfg['state']['sample_hz'], stop_event=stop,
             logger=logs['rl_state_20260914.jsonl'], sync_logger=logs['synchronized_sensors.jsonl'],
-            raw_loggers=raw, failure_queue=failures)
+            raw_loggers=raw, failure_queue=failures, raw_sensor_buffers=sensors.buffers)
         sync.start()
         guard.sync = sync
         until = time.monotonic() + cfg['runtime']['sensor_ready_timeout_s']

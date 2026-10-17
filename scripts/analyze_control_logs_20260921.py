@@ -136,7 +136,8 @@ def analyze(session, output, *, start=None, end=None, surface_pressure_pa=None, 
             break
     reference = surface_pressure_pa if surface_pressure_pa is not None else number(calibration.get('p_surface_pa'))
     empirical = number(calibration.get('pressure_per_meter'))
-    if calibration.get('depth_conversion') == 'linear_pressure' and (empirical is None or empirical <= 0):
+    drift_mode = calibration.get('depth_conversion') == 'pressure_drift_lookup'
+    if calibration.get('depth_conversion') in ('linear_pressure', 'pressure_drift_lookup') and (empirical is None or empirical <= 0):
         raise ValueError('经验深度标定缺少有效 pressure_per_meter')
     density = rho if rho is not None else number(calibration.get('water_density_kg_m3'))
     g = gravity if gravity is not None else number(calibration.get('gravity_mps2'))
@@ -177,7 +178,7 @@ def analyze(session, output, *, start=None, end=None, surface_pressure_pa=None, 
                 metrics[f'{sensor}.{label}'] = stats(values)
                 if np.isfinite(values).any():
                     ax.plot(np.insert(t, gaps, np.nan), np.insert(values, gaps, np.nan), lw=.8, label=label)
-            if sensor == 'depth' and unit == '压力 / kPa' and reference is not None:
+            if sensor == 'depth' and unit == '压力 / kPa' and reference is not None and not drift_mode:
                 ax.axhline(reference/1000, color='#b84b35', ls='--', label=f'水面参考 {reference/1000:g} kPa')
             if sensor == 'depth' and unit == '深度 / m' and target is not None:
                 ax.axhline(target, color='#b84b35', ls='--', label=f'目标 {target:g} m')
@@ -199,10 +200,25 @@ def analyze(session, output, *, start=None, end=None, surface_pressure_pa=None, 
 
     pressure = channel(raw['depth'], 'pressure_pa')
     depth = (pressure-reference)/(empirical if empirical is not None else density*g) if reference is not None else channel(raw['depth'], 'depth_m')
+    pressure_curves = [('pressure_kpa', pressure/1000)]
+    if drift_mode:
+        # 使用本次会话保存的模型和采样起点，不以动作开始或分析裁剪起点重新计时。
+        if reference is None:
+            raise ValueError('漂移深度标定缺少 P0')
+        lookup = json.loads((session/'pressure_drift.json').read_text(encoding='utf-8'))['lookup']
+        elapsed = np.array([(r['t_ns']-calibration['pressure_drift_origin_t_ns'])/1e9 for r in raw['depth']])
+        if np.any((elapsed < lookup['start_s']) | (elapsed > lookup['end_s'])):
+            raise ValueError('压力采样时间超出本次漂移查表范围')
+        drift_values = np.interp(elapsed,
+            lookup['start_s']+np.arange(len(lookup['pressure_drift_pa']))*lookup['step_s'],
+            lookup['pressure_drift_pa'])
+        depth = (pressure-reference-drift_values)/empirical
+        pressure_curves += [('corrected_pressure_kpa', (pressure-drift_values)/1000),
+                            ('surface_reference_kpa', (reference+drift_values)/1000)]
     if reference is None:
         warnings.append('缺少可用的水面压力标定：深度图仅使用日志自带 depth_m（若有），不猜测零点')
     figure('pressure_depth.png', '压力、换算深度与温度', 'depth', [
-        ('压力 / kPa', [('pressure_kpa', pressure/1000)]),
+        ('压力 / kPa', pressure_curves),
         ('深度 / m', [('depth_m', depth)]),
         ('温度 / °C', [('temperature_c', channel(raw['depth'], 'temperature_c'))])])
     figure('imu_attitude.png', 'IMU 原始欧拉角（未减标定零点、未展开航向角）', 'imu', [
@@ -218,8 +234,10 @@ def analyze(session, output, *, start=None, end=None, surface_pressure_pa=None, 
         warnings.append('本时间范围电流全部为0；请核对采集，不应直接视作无负载')
     summary = {'session': str(session.resolve()), 'time_origin': origin_note, 'origin_t_ns': origin,
                'range_s': {'start': start, 'end': end}, 'control_end_s': control_end,
-               'parameters': {k: meta.get(k) for k in ('dry_run', 'h0', 'k', 'action_duration_s', 'max_control_s')},
+               'parameters': {k: meta.get(k) for k in ('dry_run', 'h0', 'k', 'ki', 'action_duration_s', 'max_control_s')},
                'depth_conversion': {'surface_pressure_pa': reference, 'density_kg_m3': density,
+                                    'mode': calibration.get('depth_conversion'),
+                                    'pressure_drift_origin_t_ns': calibration.get('pressure_drift_origin_t_ns'),
                                     'pressure_per_meter': empirical,
                                     'gravity_mps2': g, 'reference_overridden': surface_pressure_pa is not None},
                'sampling': {}, 'metrics': metrics, 'warnings': warnings}

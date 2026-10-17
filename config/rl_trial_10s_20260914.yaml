@@ -1,24 +1,28 @@
 # 首轮离线试运行：水池3m；完整侧鳍动作范围已由用户确认经过实测。
 # 训练阶段每episode10秒、最多2个、总上限20秒；动作终点、更新和正常回中允许收尾。
-# 使用前保持静止等待 IMU 标定；压力参考固定，不采集水面压力均值。
+# 使用前在水面保持同姿态静止，压力测点完全浸没，等待IMU与P0标定。
 # 侧鳍 Fin-only PPO；尾部1/2/3舵机不参与训练。
 # action2 固定18种基础动作：theta=[-53,0,53]，t=[0.3,0.6]，模式=(0,0)/(1,-1)/(1,1)。
 # b1 从0开始交替；仅 b1=1 且 theta改变时记方向 sign(delta_theta)*b2，前进/后退交替。
 # 规则由 rl_actions_20260914.py 实现，PPO 使用动态合法动作掩码；旧模型不能 --resume。
 targets:
-  depth_m: 0.5             # 目标深度 m；相对 robot.yaml 中的固定压力参考，--h0 可覆盖
+  depth_m: 0.5             # 目标深度m；相对本次同姿态水面P0，使用漂移修正深度；--h0可覆盖
   heading_deg: 0.0         # 相对本次标定初始朝向的 yaw，--theta0 可覆盖
 startup:
   pretrain_wait_s: 30.0    # 启动传感器后等待；这一阶段不会初始化舵机
   sensor_warmup_s: 5.0     # 额外预热时间；健康监测持续运行
-  calibration_window_s: 5.0 # 只标定 IMU 姿态与去重力；不再标定压力
+  calibration_window_s: 5.0 # 动作前IMU与P0的稳定采样窗口；P0=mean(P-f(t))，计时不重置
   calibration_timeout_s: 30.0 # 从开始标定计时；失败退出，不进入运动
 calibration:
-  # 压力参考统一读取 robot.yaml 的 depth_sensor.surface_pressure_mbar（1038.131mbar）。
+  # 启动默认5秒窗口同时采集IMU和压力；P0使用修正后 pressure_pa 的均值。
   minimum_imu_samples: 200 # 窗口内最少 IMU 样本；与采样频率/窗口配合
+  minimum_depth_samples: 45 # 10Hz×5秒约50条，预留少量调度抖动；仍要求完整稳定窗口
+  max_pressure_std_pa: 100.0 # 修正后压力窗口标准差上限Pa；超过则继续等待稳定
   max_angle_std_deg: 1.0   # pitch/yaw/roll 各自的最大标准差，超过则重试
   water_density_kg_m3: 1000.0 # 淡水；盐水需按实际密度调整
   gravity_mps2: 9.80665    # 重力加速度，用于去重力和压力换算
+pressure_drift:
+  config_path: config/pressure_drift_10hz.json # 10Hz、Pa单位的压力漂移查表；时间从首个有效压力样本开始
 state:
   # 历史窗口保存最近 N 个已完成动作，不是传感器帧数，也不是 rollout 长度。
   # 可先比较 N=8/12/16；建议起点12。网络输入=15+5*N+3维，修改N需新开训练。
@@ -108,3 +112,4 @@ simulation:
   calibration_window_s: 0.5
   calibration_timeout_s: 5.0
   minimum_imu_samples: 30
+  minimum_depth_samples: 4 # 仅模拟的0.5秒窗口使用，真实标定仍默认5秒

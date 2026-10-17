@@ -15,6 +15,10 @@ def prepare_config(config, *, overrides=None, dry_run=False):
         for k in ("minimum_imu_samples","minimum_depth_samples"):
             if k in sim: cfg["calibration"][k]=sim[k]
     t=cfg["training"]
+    if overrides.get('calibration_window_s') is not None:
+        cfg['startup']['calibration_window_s'] = overrides['calibration_window_s']
+        if dry_run:
+            cfg['startup']['calibration_timeout_s'] = config['startup']['calibration_timeout_s']
     # 等待和监测参数必须在打开传感器或执行器前校验，NaN 不得绕过检查。
     cfg['runtime'].setdefault('safety_poll_interval_s', .01)
     cfg['state'].setdefault('stop_on_stale_decision', True)

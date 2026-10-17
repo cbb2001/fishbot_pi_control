@@ -84,9 +84,19 @@ class OnlineSafetyTests(unittest.TestCase):
         self.assertGreaterEqual(result['fin_update_count'], 2)
         self.assertTrue((self.path / 'calibration_20260914.json').is_file())
         calibration = json.loads((self.path / 'calibration_20260914.json').read_text())
-        self.assertEqual(calibration['pressure_reference_mode'], 'fixed_config')
-        self.assertEqual(calibration['depth_sample_count'], 0)
+        self.assertEqual(calibration['pressure_reference_mode'], 'drift_corrected_sample_mean')
+        self.assertGreaterEqual(calibration['depth_sample_count'], 4)
         self.assertAlmostEqual(calibration['p_surface_pa'], self.robot['depth_sensor']['surface_pressure_mbar']*100.)
+        raw_depth = [json.loads(x) for x in (self.path/'raw_depth.jsonl').read_text().splitlines()]
+        self.assertEqual(calibration['pressure_drift_origin_t_ns'], raw_depth[0]['t_ns'])
+        self.assertTrue(all('pressure_drift_pa' not in x['data'] for x in raw_depth))
+        states = [json.loads(x) for x in (self.path/'rl_state_20260914.jsonl').read_text().splitlines()]
+        for row in states:
+            expected = (row['raw_pressure_pa']-calibration['p_surface_pa']-row['pressure_drift_pa'])/9806.65
+            self.assertAlmostEqual(row['depth_m'], expected)
+            self.assertAlmostEqual(row['pressure_pa'], row['raw_pressure_pa']-row['pressure_drift_pa'])
+        metadata = yaml.safe_load((self.path/'metadata.yaml').read_text(encoding='utf-8'))
+        self.assertEqual(metadata['robot_config']['sensors']['depth']['rate_hz'], 10.)
         self.assertTrue(self.controllers[0].off.is_set())
         self.assertFalse((self.path / 'faults_20260914.jsonl').read_text())
         self.assertTrue((self.path / 'update_holds_20260914.jsonl').read_text())

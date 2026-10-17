@@ -106,7 +106,7 @@ class RLStateSyncWorker:
     """
     def __init__(self, builder, buffer=None, rate_hz=30., stop_event=None, logger=None,
                  clock_ns=time.monotonic_ns, *, failure_queue=None, sync_logger=None,
-                 raw_loggers=None, wait_fn=None):
+                 raw_loggers=None, wait_fn=None, raw_sensor_buffers=None):
         rate_hz = float(rate_hz)
         if not math.isfinite(rate_hz) or rate_hz <= 0:
             raise ValueError('state sample frequency must be positive and finite')
@@ -115,6 +115,7 @@ class RLStateSyncWorker:
         self.period_ns = max(1,round(1e9/rate_hz))
         self.stop_event = stop_event or threading.Event()
         self.logger,self.sync_logger,self.raw_loggers = logger,sync_logger,raw_loggers
+        self.raw_sensor_buffers = raw_sensor_buffers
         self.clock_ns = clock_ns
         self.failure_queue = failure_queue
         self.wait_fn = wait_fn or (lambda event,seconds:event.wait(max(0.,seconds)))
@@ -168,7 +169,7 @@ class RLStateSyncWorker:
         if self.raw_loggers is not None:
             sync = self.builder.synchronizer
             if sync is not None and hasattr(sync,'buffers'):
-                self.raw_loggers.write_from_buffers(sync.buffers)
+                self.raw_loggers.write_from_buffers(self.raw_sensor_buffers if self.raw_sensor_buffers is not None else sync.buffers)
         self.sample_count += 1
         self.last_update_t_ns = int(scheduled_t_ns)
         return state

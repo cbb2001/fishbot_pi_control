@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+# train_rl_ppo_20260914.py 会为本次PPO会话强制使用10 Hz压力采样，并加载 pressure_drift_10hz.json。
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 if [[ "${1:-}" == "--foreground" ]]; then
   shift

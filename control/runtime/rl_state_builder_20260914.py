@@ -44,6 +44,7 @@ class RLState:
     sensor_sample_t_ns: dict[str, int]
     warnings: tuple[str, ...] = ()
     reward: Any = None
+    pressure_correction: dict[str, Any] = field(default_factory=dict)
 
     @property
     def obs(self):
@@ -64,6 +65,7 @@ class RLState:
         result = {name: getattr(self, name) for name in self.__dataclass_fields__
                   if name not in ('observation', 'reward')}
         result['observation'] = self.observation.tolist()
+        result.update(self.pressure_correction)
         if self.reward is not None:
             result['reward'] = self.reward.as_dict()
             result.update(self.reward.as_dict())
@@ -212,7 +214,9 @@ class RLStateBuilder:
             {'pitch_deg':pitch, 'yaw_deg':yaw, 'roll_deg':roll, 'depth_m':depth})
         result = RLState(t_ns, observation, pitch, yaw, roll, linear_acc, raw_acc, raw_angles, quat,
                          depth, pressure, power, servos, dict(pose), ages, timestamps,
-                         tuple(warnings), reward_result)
+                         tuple(warnings), reward_result,
+                         {key: data['depth'][key] for key in
+                          ('raw_pressure_pa', 'pressure_drift_pa', 'drift_elapsed_s') if key in data['depth']})
         self.last_state = result
         self.last_diagnostics = result.to_dict()
         return result

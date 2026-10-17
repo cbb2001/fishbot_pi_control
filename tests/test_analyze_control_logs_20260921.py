@@ -14,6 +14,21 @@ def write_rows(path, rows):
     path.write_text('\n'.join(json.dumps(row) for row in rows)+'\n', encoding='utf-8')
 
 
+def test_drift_depth_uses_sampling_origin_when_analysis_is_cropped(tmp_path):
+    write_rows(tmp_path/'raw_depth.jsonl', [
+        {'t_ns':1_000_000_000,'data':{'pressure_pa':104000.}},
+        {'t_ns':3_000_000_000,'data':{'pressure_pa':104000.-200+9806.65*.2}}])
+    write_rows(tmp_path/'commands.jsonl',[{'t_ns':3_000_000_000}])
+    (tmp_path/'calibration.json').write_text(json.dumps({
+        'p_surface_pa':104000.,'pressure_per_meter':9806.65,
+        'depth_conversion':'pressure_drift_lookup','pressure_drift_origin_t_ns':1_000_000_000}))
+    (tmp_path/'pressure_drift.json').write_text(json.dumps({'lookup':{
+        'start_s':0.,'end_s':2.,'step_s':1.,'pressure_drift_pa':[0.,-100.,-200.]}}))
+    report = api.analyze(tmp_path,tmp_path/'output',start=0)
+    summary = json.loads((report.parent/'summary.json').read_text(encoding='utf-8'))
+    assert summary['metrics']['depth.depth_m']['mean'] == pytest.approx(.2)
+
+
 @pytest.mark.parametrize('coefficient,expected_depth', [(None,.1),(750,1000/750)])
 def test_shared_origin_calibrated_depth_and_missing_sensors(tmp_path, coefficient, expected_depth):
     write_rows(tmp_path/'commands.jsonl', [{'t_ns': 2_000_000_000}])

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""树莓派侧鳍在线 PPO 入口；默认只做 Fin 控制，不操作尾部三舵机。"""
+"""侧鳍在线 PPO：10Hz压力漂移修正、启动P0/IMU标定，不操作尾部三舵机。"""
 from __future__ import annotations
 import argparse
 import signal
@@ -22,6 +22,7 @@ def parse_args():
     p.add_argument('--resume',nargs='?',const='latest'); p.add_argument('--seed',type=int)
     p.add_argument('--max-training-s',type=float); p.add_argument('--max-episodes',type=int)
     p.add_argument('--episode-duration-s',type=float); p.add_argument('--pretrain-wait-s',type=float)
+    p.add_argument('--calibration-window-s',type=float,help='动作前IMU/P0标定窗口，实物默认5秒')
     p.add_argument('--keep-pwm',action='store_true')
     return p.parse_args()
 
@@ -34,7 +35,7 @@ def main():
     cfg=prepare_config(rl_raw,dry_run=args.dry_run,overrides={
         'h0':args.h0,'theta0':args.theta0,'max_episodes':args.max_episodes,
         'max_training_s':args.max_training_s,'episode_duration_s':args.episode_duration_s,
-        'pretrain_wait_s':args.pretrain_wait_s})
+        'pretrain_wait_s':args.pretrain_wait_s, 'calibration_window_s':args.calibration_window_s})
     root=Path(robot_cfg.get('runtime',{}).get('log_dir','logs'))/'rl_20260914'
     session=create_run_log_dir(root,suffix='fin_only')
     resume=resolve_resume(args.resume,root) if args.resume else None

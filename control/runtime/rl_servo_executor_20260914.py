@@ -20,8 +20,11 @@ class RLServoExecutorConfig:
     command_hz: float = 50.0
     safe_recenter_s: float = 2.0
     initial_move_s: float = 0.0
+    hold_at_center: bool = False  # 水面保持可直接回中；其他任务默认冻结当前角度。
 
     def __post_init__(self):
+        if type(self.hold_at_center) is not bool:
+            raise ValueError('hold_at_center must be boolean')
         if not math.isfinite(self.command_hz) or self.command_hz <= 0:
             raise ValueError('command_hz must be positive and finite')
         if any(not math.isfinite(v) or v < 0 for v in (self.safe_recenter_s, self.initial_move_s)):
@@ -236,7 +239,9 @@ class RLServoExecutor:
     def _hold(self, ticket):
         try:
             now = self.clock_ns()
-            refs = self.scheduler.references_at(now)
+            # 一次直接写中位，不排队回中动作，也不插值；成功后取消旧轨迹及待执行动作。
+            refs = (self.scheduler.centers if self.config.hold_at_center
+                    else self.scheduler.references_at(now))
             refs = {sid:refs[sid] for sid in self.active_servo_ids}
             ack = self._write(refs)
             ticket.cancelled = self.scheduler.hold(refs)

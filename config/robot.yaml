@@ -1,6 +1,36 @@
 robot:
   name: fishbot_pi_control
 
+# 20261010 水面定点导航专用；不会修改旧下潜脚本的控制参数。
+surface_navigation_20261010:
+  t: null    # 总运动时长（秒）；null不限时，正数到时立即停止，不含t1/t2及初始化
+  # 必填实测尺寸，单位米：A0=(0,0), A1=(L,0), A2=(L,W), A3=(0,W)。
+  L: 50
+  W: 26.5
+  H: 1.93  # 米；四基站天线距水面高度，标签天线约在水面，定位校验使用此垂直高度差
+  x_d: 10  # 目标x，范围[0,L]，可用 --x-d 覆盖
+  y_d: 10  # 目标y，范围[0,W]，可用 --y-d 覆盖
+  t1: 5.0   # 人工放置时间；鱼头朝+x，不输出舵机运动指令
+  t2: 5.0    # 静止标定时间；IMU三轴在此处归零
+  theta_max: 30.0
+  theta_0: 10.0   # 左基础幅值；要求0<=theta_0<theta_max<=30
+  theta_00: 10.0  # 右基础幅值；要求0<=theta_00<theta_max，可人为加偏置
+  t_0: 0.3       # 每个action1的秒数；0为下一个PWM周期直接写目标
+  kp: 1.0
+  ki: 0.1        # 1/s；正值启用积分，先按实际水池调参
+  yaw_error_scale_deg: 90.0  # 最短角差范围[-180,180)，归一化默认除以90
+  delta_yaw: 10.0 # 角度阈值，度；与距离阈值同时满足才停止。
+  delta_s: 0.2   # 距离阈值，米。
+  imu_filter_tau_s: 0.15
+  yaw_sign: 1    # 朝+y转动的标定后yaw应增大；安装方向相反时设-1
+  calibration_max_std_deg: 3.0
+  calibration_min_samples: 20
+  imu_timeout_s: 0.5
+  uwb_timeout_s: 2.0
+  boundary_tolerance_m: 0.25  # 兼容旧配置；定位越界判断和坐标裁剪已取消，此值不再影响定位
+  range_residual_limit_m: 0.5  # 兼容旧配置；测距残差检查已取消，此值不再影响定位
+  uwb_tag: 't0:0' # 只解析该标签mc帧；KT0显示帧不重复触发动作
+
 runtime:
   mode: sensor_test
   environment: underwater
@@ -33,7 +63,7 @@ sensors:
     enabled: true
     i2c_bus: 1
     address: 0x76
-    rate_hz: 20
+    rate_hz: 10
     buffer_size: 500
     timeout_ms: 300
 
@@ -83,7 +113,7 @@ depth_sensor:
   i2c_address_7bit: 0x76
   i2c_write_address_8bit: 0xEC
   i2c_read_address_8bit: 0xED
-  surface_pressure_mbar: 1037 #1036 #1038.131 # 固定压力参考，单位 mbar；PPO直接使用此值，启动时不再压力标定。
+  surface_pressure_mbar: 1037 # 旧驱动参考mbar；PPO使用10Hz漂移修正及本次5秒窗口P0，不用此值作控制零点。
 
 uart:
   uwb_port: /dev/ttyAMA0
@@ -177,8 +207,8 @@ servo:
       role: left_pectoral_tip
       joint_name: ZQ2_JOINT
       channel: 4
-      center_angle: 90
-      min_angle: 0
+      center_angle: 91
+      min_angle: 2
       max_angle: 180
       actuation_range: 180
       sign: 1
@@ -212,9 +242,9 @@ servo:
       role: right_pectoral_tip
       joint_name: YQ2_JOINT
       channel: 6
-      center_angle: 90
+      center_angle: 89
       min_angle: 0
-      max_angle: 180
+      max_angle: 178
       actuation_range: 180
       sign: 1
       direction:
@@ -233,10 +263,10 @@ servo:
 discrete_action_coupling:
   left:
     root_reference_span_deg: 106.0
-    tip_reference_span_deg: 90.0
+    tip_reference_span_deg: 89.0
   right:
     root_reference_span_deg: 106.0
-    tip_reference_span_deg: 90.0
+    tip_reference_span_deg: 89.0
 
 # 20260725 人工绝对离散动作的独立数学标定。
 # 七路参考中位直接复用上方 servo.channels.center_angle：
@@ -250,16 +280,16 @@ discrete_absolute_actions_20260725:
     root_servo_id: 4
     tip_servo_id: 5
     root_reference_span_deg: 106.0
-    tip_reference_span_deg: 90.0
+    tip_reference_span_deg: 89.0
   right_fin:
     root_servo_id: 6
     tip_servo_id: 7
     root_reference_span_deg: 106.0
-    tip_reference_span_deg: 90.0
+    tip_reference_span_deg: 89.0
 
 safety:
-  min_voltage_v: 10.5
-  max_current_a: 10.0
+  min_voltage_v: 9.0
+  max_current_a: 12.0
   max_depth_m: 5.0
   stop_on_imu_timeout: false
   stop_on_uwb_timeout: false

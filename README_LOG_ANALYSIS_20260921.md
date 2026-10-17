@@ -60,6 +60,9 @@ python scripts/analyze_control_logs_20260921.py --latest --start-s 0 --end-s 60 
 压力图显示 kPa，源日志的压力值是 Pa。新版固定策略日志含 `pressure_per_meter` 时，深度按
 `(pressure_pa - p_surface_pa) / pressure_per_meter` 重算；旧日志仍使用该次标定中的水面压力、密度和重力重算。
 经验系数日志的 `--rho`/`--gravity` 不改变该经验公式。
+2026-10-01起的固定下潜漂移补偿日志会读取会话中的 `pressure_drift.json` 快照，
+用 `calibration.json` 保存的首个有效压力采样时刻查表，按 `(P-P0-f(t))/pressure_per_meter` 重算深度；
+压力图同时显示原始压力、去漂移压力和动态水面参考。请一并拷贝这两个标定文件。
 不使用当前 robot.yaml 的数值。没有参考压力时，只绘制日志自带的 depth_m 并明确提示。
 支持以下参数仅用于离线对比，不更改运行配置或源日志：
 

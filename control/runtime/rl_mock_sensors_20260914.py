@@ -30,12 +30,17 @@ class _RLSensorWorker(MockSensorWorker):
         if self.name == 'depth':
             # Starts at the calibrated surface and settles around 0.5 metres.
             depth = 0. if surface else .5 * (1. - math.exp(-3. * elapsed)) + .02 * math.sin(.5 * elapsed)
-            return self.make_sample({
+            sample = self.make_sample({
                 'depth_m': depth,
                 'pressure_pa': float(self.manager.config.get('depth_sensor', {}).get('surface_pressure_mbar', 1013.25)) * 100.
                     + depth * calibration.water_density_kg_m3 * calibration.gravity_mps2,
                 'temperature_c': 22.,
             })
+            drift = getattr(self.manager, 'pressure_drift', None)
+            if drift is not None:
+                drift.observe([sample])
+                sample.data['pressure_pa'] += drift.drift_pa(drift.elapsed_s(sample.t_ns))
+            return sample
 
         # A nonlevel zero also exercises calibration in an arbitrary mounting pose.
         pitch, yaw, roll = -7., 25., 5.
