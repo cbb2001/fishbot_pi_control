@@ -20,7 +20,8 @@ class ServoStateTracker20260725Tests(unittest.TestCase):
     """覆盖 previous/current 历史语义和最近成功命令二分查询。"""
 
     def setUp(self) -> None:
-        self.calibration = build_calibration(load_robot_config())
+        self.config = load_robot_config()
+        self.calibration = build_calibration(self.config)
         self.mission_start = 1_000_000_000
         mission = DiscreteAbsoluteMission(
             "tracker",
@@ -138,15 +139,8 @@ class ServoStateTracker20260725Tests(unittest.TestCase):
         self.assertEqual(pose["tail_action_progress"], 1.0)
         self.assertEqual(
             pose["reference_angles_deg"],
-            {
-                1: 115.0,
-                2: 125.0,
-                3: 125.0,
-                4: 111.0,
-                5: 90.0,
-                6: 143.0,
-                7: 90.0,
-            },
+            {row['servo_id']:row['center_angle']+(30. if row['servo_id'] in (1,2,3) else 0.)
+             for row in self.config['servo']['channels']},
         )
 
     def test_history_owns_private_trajectory_dictionaries(self) -> None:

@@ -14,7 +14,9 @@ from control.safety import load_robot_config
 
 class AbsoluteDiscreteActionTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.calibration = build_absolute_calibration(load_robot_config())
+        self.config = load_robot_config()
+        self.calibration = build_absolute_calibration(self.config)
+        self.raw_servos = {s['servo_id']:s for s in self.config['servo']['channels']}
 
     def test_quintic_endpoints_and_endpoint_derivatives(self) -> None:
         self.assertEqual(quintic_smoothstep(0), 0)
@@ -64,7 +66,7 @@ class AbsoluteDiscreteActionTests(unittest.TestCase):
         trajectory = build_trajectory("right_fin", FinAbsoluteAction(170, 20, 0),
                                       {6: 143, 7: 90}, self.calibration)
         for elapsed in (0, trajectory.duration_s / 4, trajectory.duration_s):
-            self.assertEqual(trajectory.evaluate(elapsed)[7], 90)
+            self.assertEqual(trajectory.evaluate(elapsed)[7], self.raw_servos[7]['center_angle'])
 
     def test_speed_limits_and_nonpositive_speed_rejected(self) -> None:
         for speed in (
@@ -104,7 +106,10 @@ class AbsoluteDiscreteActionTests(unittest.TestCase):
     def test_right_formula_is_not_mirrored(self) -> None:
         trajectory = build_trajectory("right_fin", FinAbsoluteAction(196, 53, 1),
                                       {6: 143, 7: 90}, self.calibration)
-        self.assertAlmostEqual(trajectory.peak_angle_deg, 135)
+        coupling = self.config['discrete_action_coupling']['right']
+        expected = (self.raw_servos[7]['center_angle']
+                    + (196-143)/coupling['root_reference_span_deg']*coupling['tip_reference_span_deg'])
+        self.assertAlmostEqual(trajectory.peak_angle_deg, expected)
 
     def test_right_tip_peak_out_of_range_rejects_whole_mission(self) -> None:
         config = copy.deepcopy(load_robot_config())

@@ -100,6 +100,7 @@ class ImageWriter:
             saved = bool(cv2.imwrite(str(path), task.frame, params))
             if not saved:
                 error = "cv2_imwrite_failed"
+                self.last_error = error
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             self.last_error = error

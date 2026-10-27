@@ -284,6 +284,8 @@ class NavigationDecision:
     reached: bool
     limited: bool
     pi_output: float = 0.  # 带符号的PI输出e；effort=abs(e)，供幅值计算和日志核对。
+    control_mode: str = 'pi'
+    # theta_left/theta_right保留日志字段名；强转向时表示第一/第二动作，可同号。
 
 
 class NavigationPolicy:
@@ -310,6 +312,19 @@ class NavigationPolicy:
         desired = math.degrees(math.atan2(dy, dx)) if distance > 1e-9 else yaw
         error = wrap180(desired-yaw)
         direction = (error > 0) - (error < 0)
+        # 到点仍优先暂停；大角差时绕过PI，按同侧30°、20°依次往复。
+        reached = distance < c.delta_s
+        if not reached and abs(error) >= 45.:
+            self.integral = 0.
+            self.last_t_ns = None  # 恢复PI时不把强转向所耗时间计入积分。
+            self.last_direction = 0
+            first, second = direction*30., direction*20.
+            limited_first = min(self.upper, max(self.lower, first))
+            limited_second = min(self.upper, max(self.lower, second))
+            return NavigationDecision(x, y, yaw, desired, error, distance, 0.,
+                                      limited_first, limited_second, False,
+                                      limited_first != first or limited_second != second,
+                                      control_mode='turn_positive' if direction > 0 else 'turn_negative')
         # yaw最短角差为[-180,180)，按可调角度尺度归一化并保留方向。
         normalized = min(1., max(-1., error/c.yaw_error_scale_deg))
         p = c.kp*normalized
@@ -334,7 +349,6 @@ class NavigationPolicy:
         limited_left = min(self.upper, max(self.lower, left))
         limited_right = min(self.upper, max(self.lower, right))
         # 到点只判断距离；即使鱼头背向目标，也应回中暂停，避免近点继续游走。
-        reached = distance < c.delta_s
         if reached:
             self.integral = 0.
         return NavigationDecision(x, y, yaw, desired, error, distance, effort,

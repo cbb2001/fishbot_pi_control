@@ -2,49 +2,90 @@ name: discrete_absolute_actions_20260725_action4_down_tail_fins_up_A
 
 
 tail_actions:
-  - theta: -15.0
-    t: 1
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3 
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3 
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3 
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3 
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3  
+  - theta: -30.0
+    t: 0.3
+  - theta: -20.0
+    t: 0.3    
 
-  - theta: 0.0
-    t: 1
-
-  - theta: -15.0
-    t: 1
-
-  - theta: 0.0
-    t: 1
-
-  - theta: -15.0
-    t: 1
-
-  - theta: 0.0
-    t: 1
-
-  - theta: -15.0
-    t: 1
-
-  - theta: 0.0
-    t: 1
 
 left_fin_actions:
-  - theta: 58.0
+  - theta: 111.0
     t: 1
     b1: 0
     b2: 1
 
-  - theta: 164.0
-    t: 1
-    b1: 1
-    b2: 1
 
 
 right_fin_actions:
-  - theta: 196.0
+  - theta: 143.0
     t: 1
     b1: 0
     b2: 1
-
-  - theta: 90.0
-    t: 1
-    b1: 1
-    b2: -1

@@ -78,6 +78,51 @@ def read_rows(path):
     return [json.loads(line) for line in path.read_text(encoding='utf-8').splitlines()]
 
 
+@pytest.mark.parametrize('target_y,angles', [(2., [30., 20.]), (0., [-30., -20.])])
+def test_large_heading_repeats_actions_without_waiting_for_new_fix(robot, cfg, tmp_path, target_y, angles):
+    result = run_session(robot, replace(cfg, x_d=1., y_d=target_y, uwb_timeout_s=2.), tmp_path,
+                         sensors=ScriptedSensors(drop_uwb=True), controller=DryRunRLServoController(),
+                         max_control_s=.7)
+    assert result['fault'] is None
+    commands = read_rows(tmp_path / 'commands.jsonl')
+    assert len(commands) >= 6
+    assert [row['action']['theta'] for row in commands] == (angles*len(commands))[:len(commands)]
+    assert all(row['action']['t'] == cfg.t_0 for row in commands)
+    first_actions = [row for row in commands if row['pair_index'] == 0]
+    assert len({row['uwb_frame_id'] for row in first_actions}) < len(first_actions)
+
+
+@pytest.mark.parametrize('heading_after,expected_mode,expected_theta', [
+    (90., 'pi', -10.), (180., 'turn_negative', -30.),
+])
+def test_latest_imu_switches_mode_before_second_turn_action(
+        robot, cfg, tmp_path, heading_after, expected_mode, expected_theta):
+    sensors = ScriptedSensors(drop_uwb=True)
+    hardware = DryRunRLServoController()
+    snapshot = sensors.buffers['imu'].snapshot
+
+    def changing_heading():
+        # 第一动作接近端点时改变IMU，留出采样时间；执行器仍负责串行和回执。
+        turned = any(row.get(0, 0.) > 110. for row in hardware.commands)
+        return [SensorSample('imu', row.t_ns, row.seq,
+                {**row.data, 'yaw_deg': 179.9+heading_after if turned else 179.9})
+                for row in snapshot()]
+
+    sensors.buffers['imu'].snapshot = changing_heading
+    result = run_session(robot, replace(cfg, x_d=1., y_d=2., imu_filter_tau_s=0.,
+                                       t_0=.4, uwb_timeout_s=2.), tmp_path,
+                         sensors=sensors, controller=hardware, max_control_s=1.)
+    assert result['fault'] is None
+    commands = read_rows(tmp_path / 'commands.jsonl')
+    assert commands[0]['action']['theta'] == 30.
+    # 毫米取整的UWB测距会造成约0.03°目标方位偏差，PI据此有微小修正。
+    assert commands[1]['action']['theta'] == pytest.approx(expected_theta, abs=.01)
+    assert commands[1]['decision']['control_mode'] == expected_mode
+    assert commands[1]['pair_index'] == 0
+    assert commands[1]['decision']['yaw_deg'] == pytest.approx(
+        90. if heading_after == 90. else -180.)
+
+
 def test_outside_uwb_position_drives_navigation_without_boundary_hold(robot, cfg, tmp_path):
     class OutsideSensors(ScriptedSensors):
         def ranges_at(self, elapsed):
@@ -539,7 +584,8 @@ def test_reused_fix_recomputes_heading_between_action_pairs(robot, cfg, tmp_path
     assert len({r['uwb_frame_id'] for r in reused}) == 1
     assert any(abs(r['yaw_deg']) < 1. for r in reused)
     assert any(abs(r['yaw_deg']+60.) < 1. for r in reused)
-    assert reused[-1]['theta_left'] < reused[0]['theta_left'] - 1.
+    assert reused[-1]['control_mode'] == 'turn_positive'
+    assert (reused[-1]['theta_left'], reused[-1]['theta_right']) == (30., 20.)
 
 
 @pytest.mark.parametrize('when', ['before_request', 'during_write'])

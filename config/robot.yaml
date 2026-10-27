@@ -287,6 +287,77 @@ discrete_absolute_actions_20260725:
     root_reference_span_deg: 106.0
     tip_reference_span_deg: 89.0
 
+# 水下导航：复用 surface_navigation_20261010 的 L/W/H、目标点及尾鳍参数。
+# L/W 必须是四基站实际矩形边长，H 是基站到初始水面标签的天线高度差。
+# 首次标定/定位后立即导航；以后每段 t4 到期上浮。相机开关及存图遵循 sensors.vision。
+underwater_navigation_20261026:
+  h0: 0.3
+  t1: 5.0                    # 人工放置，鱼头朝水池 +X，不初始化 PWM
+  t2: 5.0                    # 全窗口静止 IMU/压力校准
+  t3: 120.0                  # 首次导航起总任务时间，包含上浮与取数
+  t4: 5.0                    # 每段导航时间，包含下潜及到点保持
+  depth_kp: 1.0
+  depth_ki: 0.0
+  fin_duration_s: 0.3
+  initial_b2: 1
+  accel_tau_s: 0.20          # 两级串联一阶低通，各级时间常数；0 关闭
+  yaw_tau_s: 0.15
+  depth_tau_s: 0.15
+  history_s: 5.0             # UWB 延迟校正的原始样本/滤波状态历史
+  imu_gap_s: 0.05
+  # IMU/压力/电源的新鲜度直接读取 sensors.*.timeout_ms，不在此重复定义。
+  fix_timeout_s: 30.0
+  surface_timeout_s: 30.0
+  settle_s: 1.0              # 全归中后机械/水面扰动消退时间
+  window_s: 2.0
+  min_span_s: 1.5
+  min_frames: 12
+  uwb_age_s: 0.3
+  uwb_gap_s: 0.3
+  min_retained: 0.8
+  range_floor_m: 0.15
+  range_mad_m: 0.08
+  residual_m: 0.5
+  position_p90_m: 0.25
+  velocity_change_mps: 0.10
+  max_surface_speed_mps: 0.5
+  stable_s: 0.5
+  stable_frames: 3
+  boundary_m: 5
+  resume_depth_m: 0.02       # 上浮压力零点暂停后的恢复回差
+  resume_depth_samples: 3
+  auto_bias: false           # 水面归中不等于静止，默认只校正位置/速度
+  bias_window_s: 2.0
+  bias_speed_mps: 0.03
+  bias_gyro_radps: 0.05
+  bias_acc_std_mps2: 0.05
+  bias_depth_std_m: 0.005
+  bias_gain: 0.1
+  bias_step_mps2: 0.005
+  # 运行周期与关闭时限（秒），原来代码中的固定值集中到这里。
+  control_poll_s: 0.005
+  merge_delay_s: 0.020       # 跨传感器按采集时间排序的合并等待
+  status_hz: 1.0
+  ready_timeout_s: 5.0
+  safety_poll_s: 0.01
+  center_ack_timeout_s: 2.0
+  shutdown_timeout_s: 3.0
+  # 静止标定；数量根据 sensors 中的采样率和 t2 自动计算。
+  calibration_coverage_ratio: 0.8
+  calibration_sample_ratio: 0.9
+  calibration_max_angle_std_deg: 1.0
+  calibration_max_pressure_std_pa: 100.0
+  calibration_max_linear_acc_rms_mps2: 0.5
+  calibration_max_acc_std_mps2: 0.25
+  calibration_max_gyro_radps: 0.15
+  calibration_max_quat_euler_tilt_error_deg: 5.0
+  gravity_mps2: 9.80665
+  water_density_kg_m3: 1000.0
+  # 相对项目根目录；必须与 sensors.depth.rate_hz 及文件内 sample_rate_hz 一致。
+  pressure_drift_file: config/pressure_drift_10hz.json
+  # 采样率读取 sensors；PWM写入频率读取 servo.discrete_executor.command_hz；
+  # 日志队列/刷新读取 logging.write_queue_maxsize / flush_interval_s。
+
 safety:
   min_voltage_v: 9.0
   max_current_a: 12.0

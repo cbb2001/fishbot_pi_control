@@ -125,8 +125,9 @@ class DiscreteActionMathTests(unittest.TestCase):
 
     def test_right_fin_uses_right_physical_references(self) -> None:
         values = evaluate_fin_action(FinAction(4.0, 1, 1.0), 1.0, (6, 7), self.calibration)
-        self.assertEqual(values[6], 90.0)
-        self.assertEqual(values[7], 90.0)
+        servos = {s['servo_id']:s for s in self.config['servo']['channels']}
+        self.assertEqual(values[6], servos[6]['direction']['bottom_reference_angle'])
+        self.assertEqual(values[7], servos[7]['center_angle'])
         tip_at_three_eighths = evaluate_fin_action(
             FinAction(4.0, 1, 1.0), 1.5, (6, 7), self.calibration
         )

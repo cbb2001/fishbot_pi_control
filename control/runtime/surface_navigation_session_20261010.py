@@ -505,9 +505,11 @@ no_servo进入真实传感器诊断，不初始化任何舵机后端。
                 processed_id = consumed_id = None
                 continue
             now = time.monotonic_ns()
+            completed_actions = executor.drain_completed()
             # 缺测期间每组动作结束后，以完整旧定位和最新IMU重算下一组。
             decision_updated = False
-            if latest_fix['uwb_frame_id'] != processed_id or (reuse_last_fix and active_pair is None and not holding):
+            if (latest_fix['uwb_frame_id'] != processed_id or completed_actions or
+                    (reuse_last_fix and active_pair is None and not holding)):
                 decision_updated = True
                 if holding:
                     # 暂停时不积累航向积分；漂移恢复从当前误差重新计算。
@@ -531,6 +533,7 @@ no_servo进入真实传感器诊断，不初始化任何舵机后端。
                         center_tail()
                     active_pair = None
                     inflight_id = None
+                    completed_actions = []  # 已到点回中，丢弃本轮收取的旧动作回执。
                 elif holding and latest_decision.distance_m >= cfg.delta_s:
                     # 保持中只依据位置漂出容差恢复；近点方位角变化不触发反复游动。
                     holding = False
@@ -538,20 +541,31 @@ no_servo进入真实传感器诊断，不初始化任何舵机后端。
                     event('navigation_resumed', **asdict(latest_decision))
             for item in executor.drain_started():
                 event('action_started', request_id=item.request_id, context=item.context)
-            for item in executor.drain_completed():
+            restart_pair = False
+            for item in completed_actions:
                 if not item.endpoint_written or item.request_id != inflight_id:
                     raise RuntimeError('尾鳍动作回执不匹配或端点PWM未确认')
                 event('action_completed', request_id=item.request_id, context=item.context)
                 inflight_id = None
-                if active_pair['index'] == 0:
+                if active_pair['decision'].control_mode != latest_decision.control_mode:
+                    # 每个动作完成后用最新标定IMU判断，取消尚未开始的旧模式动作。
+                    # 即使没有新UWB帧，也应立即恢复PI或从相反方向的30°开始。
+                    if active_pair['index'] == 1:
+                        completed_pairs += 1
+                    active_pair = None
+                    restart_pair = True
+                elif active_pair['index'] == 0:
                     active_pair['index'] = 1
+                    if latest_decision.control_mode != 'pi':
+                        active_pair['decision'] = latest_decision
                     inflight_id = submit(active_pair['decision'].theta_right, active_pair, 1)
                 else:
                     completed_pairs += 1
                     active_pair = None
             check_time_limit()
             if not holding and active_pair is None and (processed_id != consumed_id or
-                                                       (reuse_last_fix and decision_updated)):
+                                                       (reuse_last_fix and decision_updated) or
+                                                       latest_decision.control_mode != 'pi' or restart_pair):
                 if not executor_started:
                     ensure_executor()
                     continue  # 初始化期间仍收数；下一轮先检查新定位与到达状态。
@@ -564,7 +578,7 @@ no_servo进入真实传感器诊断，不初始化任何舵机后端。
                 d = latest_decision
                 print(f'x={d.x:.3f} y={d.y:.3f} yaw={d.yaw_deg:.1f}° '
                       f'yaw_d={d.yaw_d_deg:.1f}° 距离={d.distance_m:.3f}m '
-                      f'左/右={d.theta_left:.1f}/{d.theta_right:.1f}° '
+                      f'模式={d.control_mode} 动作1/2={d.theta_left:.1f}/{d.theta_right:.1f}° '
                       f'复用定位={reuse_last_fix} '
                       f"定位年龄={(time.monotonic_ns()-latest_fix['sample_t_ns'])/1e9:.2f}s", flush=True)
                 print_due = time.monotonic()+1.

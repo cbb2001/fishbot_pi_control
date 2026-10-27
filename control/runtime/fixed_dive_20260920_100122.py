@@ -369,8 +369,8 @@ def run_session(cfg, robot_cfg, session, *, h0, k=1., ki=0., initial_b2=1, dry_r
     if dry_run:
         # 只调整模拟压力轨迹斜率，让模拟深度与本次经验系数一致。
         sensor_cfg['calibration']['water_density_kg_m3'] = pressure_per_meter / float(cfg['calibration'].get('gravity_mps2', 9.80665))
-    for name in ('vision', 'uwb'):
-        sensor_cfg['sensors'].setdefault(name, {})['enabled'] = False
+    sensor_cfg['sensors'].setdefault('vision', {})['enabled'] = False
+    # UWB沿用robot配置，仅由RawSensorLoggers保存原始样本，不参与下潜控制。
     if dry_run:
         from .rl_mock_sensors_20260914 import MockRLSensorManager
         sensors = MockRLSensorManager(sensor_cfg, stop_event=stop, log_dir=session)

@@ -88,6 +88,22 @@ class RLActionScheduler:
         self.previous_theta['fin'] = self.committed_angles[4]-self.centers[4]
         self.previous_theta['tail'] = self.committed_angles[1]-self.centers[1]
         return cancelled
+
+    def hold_groups(self, angles_deg, agents):
+        """仅取消指定组；兄弟组仍按原时间轴运动（由 PWM 写入确认后调用）。"""
+        cancelled = []
+        for agent in agents:
+            item = self.active[agent]
+            if item is not None:
+                cancelled.append(item)
+                if agent == 'fin':
+                    self._fin_sequence_interrupted = True
+            self.active[agent] = None
+            ids = TAIL_SERVO_IDS if agent == 'tail' else FIN_SERVO_IDS
+            self.committed_angles.update({i: angles_deg[i] for i in ids})
+            root = ids[0]
+            self.previous_theta[agent] = angles_deg[root] - self.centers[root]
+        return cancelled
     def tick(self, t_ns: int|None = None) -> tuple[dict[int,float], list[ScheduledRLAction]]:
         t = int(self.clock_ns() if t_ns is None else t_ns)
         refs = self.references_at(t); done=[]

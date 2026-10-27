@@ -1,0 +1,39 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-10-26-underwater-navigation.md
+
+- 最新用户追加任务完成：修正旧测试中的固定标定/动作数量假设；水下可调参数以 robot.yaml 为来源，保留已有显式 CLI 临时覆盖，传感器配置不再被会话代码强制重写。
+- 最新回归取代下文历史失败状态：595 passed、113 subtests passed，零失败；报告 robot-yaml-regression.txt。新增五项配置来源测试先 RED 后 GREEN。
+- YAML-only 参数模拟验证通过：IMU 100 Hz、PWM 80 Hz、相机关闭、t1/t2/t3/t4=0/1/8/1 秒，完成导航/上浮/重定位，正常 time_limit，无故障/清理错误/存活线程。日志 logs/underwater_navigation_20261026_yaml_check；实际 robot.yaml 的舵机标定与传感器采样值未改。
+
+- 用户已确认修改后的设计，进入实现。
+- Ruling: 使用当前工作目录、保留全部未提交用户基线，不自动提交/切换分支；避免隔离副本遗漏用户改动。代价：须通过针对性差异审阅区分新增内容。
+- Ruling: 开启摄像头存图，以用户新增日志要求为准，优先于设计前文关闭相机。代价：实机增加相机 I/O，需要监控日志故障。
+- Pre-flight: Task 1 提供分组归中/终止回执，Task 2 调度器在 PWM 归中确认后重建序列，Task 3 不从主线程改写活动轨迹。
+- Pre-flight: Task 2 估计器以采集时间接受 IMU/压力及 UWB 修正；Task 3 按采集时间合并样本并保留跨缓冲顺序。
+- Pre-flight: Task 4 配置复用现有水面几何/尾鳍参数，新增水下计时/滤波/质量阈值；不复制基站坐标。
+- Task 1: complete — 分组归中/原子停止新增测试先因接口缺失失败，再实现；新旧执行器 11 passed。
+- Task 2: complete — 新计算测试先因缺模块失败，实现后 9 passed；覆盖重力/坐标、压力、延迟回放、失锁、重复、几何、胸鳍重启。
+- Task 3: complete — 新会话测试先因缺模块失败；修正 metadata 文件路径及 Windows 模拟采样批次后 6 passed，多轮任务与 no-servo 已验证。
+- Task 4: complete — CLI --help 通过；YAML 可调滤波和质量阈值、中文 README 已完成，真实相机走原 CameraWorker 存图。
+- 回归基线：206 passed in 100.97s；新增合计 17 passed in 10.87s。
+- 测试环境：Windows pytest 临时目录创建权限与沙箱冲突；获自动审核允许后在限制外运行无硬件 pytest，未调用实际传感器/PWM。
+- Task 5: 运行全仓库回归中；原始日志生产估计器回放已执行，摆鳍频段幅值比约 0.225–0.227，无水平真值，不宣称精度。
+- Task 6: 已按 executing-plans/requesting-code-review 要求启动一位独立只读代码审阅者。
+- 全库第一次结果：17 failed / 567 passed / 111 subtests passed；其中旧几何/中位/示例任务的 16 failed 在保留用户基线的副本中、撤除本次共享文件修改后完整复现（64 passed）。水面单点 route_completed 日志顺序有一次不稳定失败，最终回归单独核查。
+- Task 5: complete — CLI 15 秒多轮 dry-run 正常 time_limit，fault=null、cleanup_errors=[]、alive_workers=[]。原始60.440秒日志回放 12088 IMU、287 mc（264完整/23部分）、最长完整帧间隔15.456秒；1.2–1.8Hz三轴幅值比0.224/0.227/0.227。
+- 恢复会话后前一审阅任务不可见且没有结果，重新发起只读审阅；得到三项 Important、无 Critical。
+- Final: fixed 相机缺帧/错误/过期未拦截 — 新camera health测试 RED→GREEN。
+- Final: fixed 图像写入返回False未持久记录错误 — 实际ImageWriter测试 RED→GREEN；共享camera_worker仅加last_error赋值，不改原存图路径。
+- Final: fixed 关闭相机后fatal_error/残留写图线程未检查 — shutdown测试 RED→GREEN。
+- Final: fixed t3截止时并发安全故障被掩盖 — LateFaultGuard集成测试 RED→GREEN，停止监测后收集failure。
+- 新任务校正：协议TID重复/反向帧拒绝（包括回绕及历史恢复）、有效估计样本新鲜度、跨阶段UWB身份去重、拒绝无法表示的纳秒计时。
+- 审阅修复后的新任务测试合计25 passed in 12.45s，正在最终相关回归。
+- Final: minor (deferred): started回执队列未消费，长时间任务会累计动作记录；默认120秒任务影响有限，后续可将started回执纳入动作日志。
+- Final: Ruling: 实机PWM/I²C阻塞时延及相机驱动关闭时延留待硬件验证；软件使用有界等待和失败报告，不声称已验证驱动可中断。代价：底层阻塞时仍可能残留daemon线程。
+- Final: Ruling: IMU硬件同步、压力漂移模型适用性和导航精度留待实测；模拟与历史回放仅验证软件行为。代价：真实水下水平误差尚未知。
+- 最终相关回归：231 passed in 111.93s；原水面 CLI 顺序测试本次通过，基线单独复跑2 passed。
+- 最终状态显示已补齐距目标、当前深度目标、四路新鲜数量；阶段事件使用实际状态机阶段，不再沿用上轮phase标签。
+- 最终8秒CLI模拟重复完成下潜/上浮/重定位并在Acquire阶段t3截止，time_limit、fault=null、cleanup_errors=[]、alive_workers=[]；结果保存 logs/underwater_navigation_20261026_final_check/result.json。
+- 本次产生的基线副本和旧pytest临时目录已在确认绝对路径后清理；保留报告与模拟日志，用户原始日志和代码未删除。
+- 一次全库重跑因pytest临时父目录未创建出现103个夹具错误，已补齐父目录后重新运行；环境错误报告独立保存，不当作代码测试结论。
+- 最终完整回归：16 failed、576 passed、111 subtests passed，188.26秒。失败项与已复现的16项基线一致，无新增失败；原水面日志顺序测试本轮通过。结果文件 underwater-test-suite-final.txt。
+- Task 6: complete — 三项 Important 全部修复并验证；Minor 和实机限制已在审阅报告记录。所有计划任务完成，保留工作区改动供用户使用，未提交/合并，未驱动真实硬件。

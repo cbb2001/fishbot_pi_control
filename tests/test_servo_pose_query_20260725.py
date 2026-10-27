@@ -20,7 +20,8 @@ class ServoPoseQuery20260725Tests(unittest.TestCase):
     """验证任意时间戳重放、保持阶段和传感器 sample_t_ns 对齐。"""
 
     def setUp(self) -> None:
-        self.calibration = build_calibration(load_robot_config())
+        self.config = load_robot_config()
+        self.calibration = build_calibration(self.config)
         self.start = 10_000_000_000
         mission = DiscreteAbsoluteMission(
             "pose",
@@ -72,15 +73,18 @@ class ServoPoseQuery20260725Tests(unittest.TestCase):
         end_pose = self.tracker.get_servo_pose_at(
             self.start + 2_000_000_000
         ).data
-        expected_peak = 135.0
-        self.assertEqual(start_pose["reference_angles_deg"][5], 90.0)
+        raw = {s['servo_id']:s for s in self.config['servo']['channels']}
+        mapping = self.config['discrete_absolute_actions_20260725']['left_fin']
+        center = raw[5]['center_angle']
+        expected_peak = center+(164-raw[4]['center_angle'])/mapping['root_reference_span_deg']*mapping['tip_reference_span_deg']
+        self.assertEqual(start_pose["reference_angles_deg"][5], center)
         self.assertEqual(quarter_pose["reference_angles_deg"][5], expected_peak)
         self.assertAlmostEqual(half_pose["reference_angles_deg"][5], expected_peak)
         self.assertEqual(
             three_quarters_pose["reference_angles_deg"][5],
             expected_peak,
         )
-        self.assertEqual(end_pose["reference_angles_deg"][5], 90.0)
+        self.assertEqual(end_pose["reference_angles_deg"][5], center)
         self.assertAlmostEqual(half_pose["left_tip_peak_angle_deg"], expected_peak)
 
     def test_equal_theta_second_action_holds_exact_angle_for_full_duration(self) -> None:

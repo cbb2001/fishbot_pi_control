@@ -98,16 +98,14 @@ class RunDiscreteAbsoluteActions20260725Tests(unittest.TestCase):
             mission,
             build_calibration(load_robot_config()),
         )
-        self.assertEqual(
-            mission.name,
-            "discrete_absolute_actions_20260725_action4_down_tail_fins_up_A",
-        )
-        self.assertEqual(len(mission.tail_actions), 141)
-        self.assertEqual(len(mission.left_fin_actions), 140)
-        self.assertEqual(len(mission.right_fin_actions), 140)
-        self.assertEqual(mission.tail_actions[0].theta, 15.0)
-        self.assertEqual(mission.left_fin_actions[1].b2, 1)
-        self.assertEqual(mission.right_fin_actions[1].b2, -1)
+        # 动作序列由 mission YAML 定义，机械标定由 robot.yaml 定义。
+        # 比对实际序列内容，既不固定旧动作数量，也不只检查“能读取”。
+        import yaml
+        from dataclasses import asdict
+        expected = yaml.safe_load(mission_path.read_text(encoding='utf8'))
+        self.assertEqual(mission.name,expected['name'])
+        for group in ('tail_actions','left_fin_actions','right_fin_actions'):
+            self.assertEqual([asdict(action) for action in getattr(mission,group)],expected[group])
 
         sync_text = (
             PROJECT_ROOT / "codex_pi_workflow" / "sync_to_pi.ps1"
@@ -280,7 +278,7 @@ class RunDiscreteAbsoluteActions20260725Tests(unittest.TestCase):
                 metadata["action_reference"]["left_fin"][
                     "tip_reference_span_deg"
                 ],
-                90.0,
+                config['discrete_absolute_actions_20260725']['left_fin']['tip_reference_span_deg'],
             )
             commands = [
                 json.loads(line)

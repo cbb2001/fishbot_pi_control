@@ -25,25 +25,21 @@ class DiscreteActions20260725Tests(unittest.TestCase):
     def setUp(self) -> None:
         self.config = load_robot_config()
         self.calibration = build_calibration(self.config)
+        # 预期从原始 YAML 独立计算，不能拿被测 trajectory 的输出作预期。
+        self.raw_servos = {s['servo_id']:s for s in self.config['servo']['channels']}
+        self.centers = {sid:s['center_angle'] for sid,s in self.raw_servos.items()}
 
     def test_default_reference_values_are_exact(self) -> None:
         self.assertEqual(
             self.calibration.initial_angles_deg,
-            {1: 85.0, 2: 95.0, 3: 95.0, 4: 111.0, 5: 90.0, 6: 143.0, 7: 90.0},
+            self.centers,
         )
         self.assertEqual(self.calibration.initial_previous_thetas["tail"], 0.0)
-        self.assertEqual(self.calibration.initial_previous_thetas["left_fin"], 111.0)
-        self.assertEqual(self.calibration.initial_previous_thetas["right_fin"], 143.0)
-        self.assertEqual(self.calibration.tail.theta_min_deg, -30.0)
-        self.assertEqual(self.calibration.tail.theta_max_deg, 30.0)
-        self.assertEqual(self.calibration.left_fin.root_servo_id, 4)
-        self.assertEqual(self.calibration.left_fin.tip_servo_id, 5)
-        self.assertEqual(self.calibration.left_fin.root_reference_span_deg, 106.0)
-        self.assertEqual(self.calibration.left_fin.tip_reference_span_deg, 90.0)
-        self.assertEqual(self.calibration.right_fin.root_servo_id, 6)
-        self.assertEqual(self.calibration.right_fin.tip_servo_id, 7)
-        self.assertEqual(self.calibration.right_fin.root_reference_span_deg, 106.0)
-        self.assertEqual(self.calibration.right_fin.tip_reference_span_deg, 90.0)
+        self.assertEqual(self.calibration.initial_previous_thetas["left_fin"], self.centers[4])
+        self.assertEqual(self.calibration.initial_previous_thetas["right_fin"], self.centers[6])
+        for group in ('tail','left_fin','right_fin'):
+            for key,value in self.config['discrete_absolute_actions_20260725'][group].items():
+                self.assertEqual(getattr(getattr(self.calibration,group),key),value)
 
     def test_current_references_are_used_when_optional_fields_are_absent(self) -> None:
         config = copy.deepcopy(self.config)
@@ -182,18 +178,20 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             111.0,
             self.calibration,
         )
-        expected_positive_peak = 135.0
-        expected_negative_peak = 45.0
+        mapping = self.config['discrete_absolute_actions_20260725']['left_fin']
+        delta = 53/mapping['root_reference_span_deg']*mapping['tip_reference_span_deg']
+        expected_positive_peak = self.centers[5]+delta
+        expected_negative_peak = self.centers[5]-delta
         self.assertAlmostEqual(increasing.tip_peak_angle_deg, expected_positive_peak)
         self.assertAlmostEqual(decreasing.tip_peak_angle_deg, expected_negative_peak)
-        self.assertEqual(increasing.evaluate(0.0), {4: 111.0, 5: 90.0})
+        self.assertEqual(increasing.evaluate(0.0), {4: 111.0, 5: self.centers[5]})
         self.assertAlmostEqual(increasing.evaluate(1.0)[4], 137.5)
         self.assertAlmostEqual(increasing.evaluate(1.0)[5], expected_positive_peak)
-        self.assertEqual(increasing.evaluate(2.0), {4: 164.0, 5: 90.0})
-        self.assertEqual(decreasing.evaluate(0.0), {4: 111.0, 5: 90.0})
+        self.assertEqual(increasing.evaluate(2.0), {4: 164.0, 5: self.centers[5]})
+        self.assertEqual(decreasing.evaluate(0.0), {4: 111.0, 5: self.centers[5]})
         self.assertAlmostEqual(decreasing.evaluate(1.0)[4], 84.5)
         self.assertAlmostEqual(decreasing.evaluate(1.0)[5], expected_negative_peak)
-        self.assertEqual(decreasing.evaluate(2.0), {4: 58.0, 5: 90.0})
+        self.assertEqual(decreasing.evaluate(2.0), {4: 58.0, 5: self.centers[5]})
 
     def test_action2_b1_zero_and_equal_theta_hold_tip_exactly(self) -> None:
         no_tip = build_trajectory(
@@ -203,7 +201,7 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             self.calibration,
         )
         for elapsed in (0.0, 0.5, 1.0, 1.999, 2.0):
-            self.assertEqual(no_tip.evaluate(elapsed)[5], 90.0)
+            self.assertEqual(no_tip.evaluate(elapsed)[5], self.centers[5])
 
         equal = build_trajectory(
             "left_fin",
@@ -212,7 +210,7 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             self.calibration,
         )
         for elapsed in (0.0, 0.5, 1.0, 1.999, 2.0):
-            self.assertEqual(equal.evaluate(elapsed), {4: 111.0, 5: 90.0})
+            self.assertEqual(equal.evaluate(elapsed), {4: 111.0, 5: self.centers[5]})
 
     def test_action3_formula_is_not_mirrored(self) -> None:
         positive = build_trajectory(
@@ -227,26 +225,33 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             143.0,
             self.calibration,
         )
-        self.assertAlmostEqual(positive.tip_peak_angle_deg, 135.0)
-        self.assertAlmostEqual(negative.tip_peak_angle_deg, 45.0)
-        self.assertEqual(positive.evaluate(0.0), {6: 143.0, 7: 90.0})
+        mapping = self.config['discrete_absolute_actions_20260725']['right_fin']
+        delta = 53/mapping['root_reference_span_deg']*mapping['tip_reference_span_deg']
+        high,low = self.centers[7]+delta,self.centers[7]-delta
+        self.assertAlmostEqual(positive.tip_peak_angle_deg, high)
+        self.assertAlmostEqual(negative.tip_peak_angle_deg, low)
+        self.assertEqual(positive.evaluate(0.0), {6: 143.0, 7: self.centers[7]})
         self.assertAlmostEqual(positive.evaluate(1.0)[6], 169.5)
-        self.assertAlmostEqual(positive.evaluate(1.0)[7], 135.0)
-        self.assertEqual(negative.evaluate(0.0), {6: 143.0, 7: 90.0})
+        self.assertAlmostEqual(positive.evaluate(1.0)[7], high)
+        self.assertEqual(negative.evaluate(0.0), {6: 143.0, 7: self.centers[7]})
         self.assertAlmostEqual(negative.evaluate(1.0)[6], 116.5)
-        self.assertAlmostEqual(negative.evaluate(1.0)[7], 45.0)
-        self.assertEqual(positive.evaluate(2.0), {6: 196.0, 7: 90.0})
-        self.assertEqual(negative.evaluate(2.0), {6: 90.0, 7: 90.0})
+        self.assertAlmostEqual(negative.evaluate(1.0)[7], low)
+        self.assertEqual(positive.evaluate(2.0), {6: 196.0, 7: self.centers[7]})
+        self.assertEqual(negative.evaluate(2.0), {6: 90.0, 7: self.centers[7]})
 
-    def test_full_fin_root_travel_reaches_zero_or_180_tip_peak(self) -> None:
-        """左右根部完整移动 106° 时，尖端按 b2 到达对应机械端点。"""
-
-        cases = (
-            ("left_fin", 58.0, FinAction(164.0, 4.0, 1, 1), 5, 180.0),
-            ("left_fin", 164.0, FinAction(58.0, 4.0, 1, -1), 5, 0.0),
-            ("right_fin", 90.0, FinAction(196.0, 4.0, 1, 1), 7, 180.0),
-            ("right_fin", 196.0, FinAction(90.0, 4.0, 1, -1), 7, 0.0),
-        )
+    def test_full_fin_root_travel_uses_configured_tip_mapping(self) -> None:
+        """完整根部行程遵循 YAML 耦合标尺，不假设尖端限位恒为0/180。"""
+        cases = []
+        for group in ('left_fin','right_fin'):
+            mapping = self.config['discrete_absolute_actions_20260725'][group]
+            root = self.raw_servos[mapping['root_servo_id']]
+            tip_id = mapping['tip_servo_id']
+            delta = ((root['max_angle']-root['min_angle'])/mapping['root_reference_span_deg']
+                     *mapping['tip_reference_span_deg'])
+            for sign in (-1,1):
+                previous,target = ((root['min_angle'],root['max_angle']) if sign>0
+                                   else (root['max_angle'],root['min_angle']))
+                cases.append((group,previous,FinAction(target,4.,1,sign),tip_id,self.centers[tip_id]+sign*delta))
         for sequence_name, previous, action, tip_id, expected_peak in cases:
             with self.subTest(sequence_name=sequence_name, b2=action.b2):
                 trajectory = build_trajectory(
@@ -287,7 +292,7 @@ class DiscreteActions20260725Tests(unittest.TestCase):
         )
         self.assertEqual(equal.duration_s, 2.0)
         for elapsed in (0.0, 0.5, 1.0, 1.999999, 2.0):
-            self.assertEqual(equal.evaluate(elapsed), {6: 143.0, 7: 90.0})
+            self.assertEqual(equal.evaluate(elapsed), {6: 143.0, 7: self.centers[7]})
 
         no_tip = build_trajectory(
             "right_fin",
@@ -296,7 +301,7 @@ class DiscreteActions20260725Tests(unittest.TestCase):
             self.calibration,
         )
         for elapsed in (0.0, 0.5, 1.0, 1.999999, 2.0):
-            self.assertEqual(no_tip.evaluate(elapsed)[7], 90.0)
+            self.assertEqual(no_tip.evaluate(elapsed)[7], self.centers[7])
 
     def test_fin_flags_duration_and_root_limits_are_strict(self) -> None:
         for theta in (58.0, 164.0):

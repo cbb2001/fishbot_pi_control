@@ -167,7 +167,40 @@ def test_imu_rejects_moving_or_invalid_calibration():
             imu.calibrate(rows)
 
 
-@pytest.mark.parametrize('yaw,left,right', [(0., -10., 12.), (-90., -20., 12.), (90., -10., 22.)])
+@pytest.mark.parametrize('error,first,second,mode', [
+    (45., 30., 20., 'turn_positive'), (90., 30., 20., 'turn_positive'),
+    (-45., -30., -20., 'turn_negative'), (-90., -30., -20., 'turn_negative'),
+    (44.9, -10., 12.+44.9/9., 'pi'), (-44.9, -10.-44.9/9., 12., 'pi'),
+])
+def test_heading_threshold_selects_ordered_actions(cfg, robot, error, first, second, mode):
+    policy = nav.NavigationPolicy(cfg, build_calibration(robot))
+    decision = policy.decide(1., 1., -error, 0)
+    assert (decision.theta_left, decision.theta_right) == pytest.approx((first, second))
+    assert decision.control_mode == mode
+
+
+def test_turn_resets_integral_before_returning_to_pi(cfg, robot):
+    policy = nav.NavigationPolicy(replace(cfg, kp=0., ki=1.), build_calibration(robot))
+    policy.decide(1, 1, -36, 0)
+    assert policy.decide(1, 1, -36, 500_000_000).effort == pytest.approx(.1)
+    for now in (600_000_000, 900_000_000):
+        turning = policy.decide(1, 1, -60, now)
+        assert turning.pi_output == 0. and policy.integral == 0.
+    resumed = policy.decide(1, 1, -36, 1_000_000_000)
+    assert resumed.control_mode == 'pi' and resumed.effort == 0.
+    assert policy.decide(1, 1, -36, 1_500_000_000).effort == pytest.approx(.1)
+
+
+@pytest.mark.parametrize('yaw,first,second', [(-90, 15., 15.), (90, -7., -7.)])
+def test_turn_respects_shared_physical_limits(cfg, robot, yaw, first, second):
+    robot['servo']['channels'][1]['min_angle'] = 88.
+    robot['servo']['channels'][2]['max_angle'] = 110.
+    decision = nav.NavigationPolicy(cfg, build_calibration(robot)).decide(1, 1, yaw, 0)
+    assert (decision.theta_left, decision.theta_right) == (first, second)
+    assert decision.limited
+
+
+@pytest.mark.parametrize('yaw,left,right', [(0., -10., 12.), (-36., -10., 16.), (36., -14., 12.)])
 def test_pi_direction_and_bias_formula(cfg, robot, yaw, left, right):
     policy = nav.NavigationPolicy(cfg, build_calibration(robot))
     decision = policy.decide(1., 1., yaw, 1_000_000_000)
@@ -176,7 +209,7 @@ def test_pi_direction_and_bias_formula(cfg, robot, yaw, left, right):
 
 
 @pytest.mark.parametrize('yaw,output,left,right', [(0., 0., -10., 12.),
-                                                 (-90., .5, -20., 12.), (90., -.5, -10., 22.)])
+                                                 (-36., .2, -10., 16.), (36., -.2, -14., 12.)])
 def test_signed_pi_output_drives_absolute_amplitude_formula(cfg, robot, yaw, output, left, right):
     policy = nav.NavigationPolicy(cfg, build_calibration(robot))
     decision = policy.decide(1., 1., yaw, 1_000_000_000)
@@ -188,20 +221,20 @@ def test_signed_pi_output_drives_absolute_amplitude_formula(cfg, robot, yaw, out
     assert decision.theta_right == pytest.approx(right)
 
 
-def test_negative_pi_integral_uses_positive_half_stroke_limit(cfg, robot):
+def test_negative_pi_preserves_existing_integral_cap_and_amplitude(cfg, robot):
     robot['servo']['channels'][2]['max_angle'] = 109.  # 中位95°，正半程最多+14°。
     policy = nav.NavigationPolicy(replace(cfg, kp=0., ki=1.), build_calibration(robot))
-    policy.decide(1., 1., 90., 0)
-    decision = policy.decide(1., 1., 90., 1_000_000_000)
-    assert decision.theta_left == -10.
-    assert decision.theta_right == 14.
+    policy.decide(1., 1., 36., 0)
+    decision = policy.decide(1., 1., 36., 1_000_000_000)
+    assert decision.theta_left == -12.
+    assert decision.theta_right == 12.
     assert policy.integral == pytest.approx(-.1)  # -(14-12)/(30-10)，带符号积分仍需防饱和。
     assert decision.pi_output == pytest.approx(-.1)
-    reversed_error = policy.decide(1., 1., -90., 1_100_000_000)
+    reversed_error = policy.decide(1., 1., -36., 1_100_000_000)
     assert reversed_error.effort == 0.  # 转向改变后清除历史积分。
 
 
-@pytest.mark.parametrize('yaw,output,left,right', [(-90., 1., -30., 12.), (90., -1., -10., 30.)])
+@pytest.mark.parametrize('yaw,output,left,right', [(-36., 1., -10., 30.), (36., -1., -30., 12.)])
 def test_signed_pi_saturates_before_absolute_amplitude(cfg, robot, yaw, output, left, right):
     policy = nav.NavigationPolicy(replace(cfg, kp=100.), build_calibration(robot))
     decision = policy.decide(1., 1., yaw, 0)
@@ -213,19 +246,20 @@ def test_behind_target_uses_atan2_and_shortest_error(cfg, robot):
     policy = nav.NavigationPolicy(replace(cfg, x_d=0., y_d=1.), build_calibration(robot))
     decision = policy.decide(1., 1., -179., 0)
     assert decision.yaw_error_deg == pytest.approx(-1.)
-    assert decision.theta_left == -10.
-    assert decision.theta_right > 12.
+    assert decision.control_mode == 'pi'
+    assert decision.theta_left < -10.
+    assert decision.theta_right == 12.
 
 
 def test_integral_actual_sample_interval_reset_and_antiwindup(cfg, robot):
     policy = nav.NavigationPolicy(replace(cfg, kp=0., ki=1.), build_calibration(robot))
-    assert policy.decide(1, 1, -90, 0).effort == 0
-    assert policy.decide(1, 1, -90, 500_000_000).effort == pytest.approx(.25)
-    assert policy.decide(1, 1, -90, 500_000_000).effort == pytest.approx(.25)
-    assert policy.decide(1, 1, -90, 10_000_000_000).effort == pytest.approx(.25)  # 长断流不积分。
+    assert policy.decide(1, 1, -36, 0).effort == 0
+    assert policy.decide(1, 1, -36, 500_000_000).effort == pytest.approx(.1)
+    assert policy.decide(1, 1, -36, 500_000_000).effort == pytest.approx(.1)
+    assert policy.decide(1, 1, -36, 10_000_000_000).effort == pytest.approx(.1)  # 长断流不积分。
     for index in range(1, 30):
-        assert 0 <= policy.decide(1, 1, -90, 10_000_000_000 + index*100_000_000).effort <= 1
-    assert policy.decide(1, 1, 90, 13_000_000_000).effort == 0  # 换向不继承旧积分。
+        assert 0 <= policy.decide(1, 1, -36, 10_000_000_000 + index*100_000_000).effort <= 1
+    assert policy.decide(1, 1, 36, 13_000_000_000).effort == 0  # 换向不继承旧积分。
     assert policy.decide(1, 1, 0, 13_100_000_000).theta_right == 12.
 
 
@@ -233,13 +267,13 @@ def test_output_respects_theta_max_and_all_three_physical_limits(cfg, robot):
     robot['servo']['channels'][1]['min_angle'] = 88.
     robot['servo']['channels'][2]['max_angle'] = 103.
     policy = nav.NavigationPolicy(replace(cfg, kp=100), build_calibration(robot))
-    left = policy.decide(1, 1, -90, 0)
-    right = policy.decide(1, 1, 90, 1_000_000_000)
+    left = policy.decide(1, 1, 36, 0)
+    right = policy.decide(1, 1, -36, 1_000_000_000)
     assert left.theta_left == -7.
     assert right.theta_right == 8.
     policy = nav.NavigationPolicy(replace(cfg, kp=100), build_calibration(yaml.safe_load(
         (Path(__file__).resolve().parents[1] / 'config/robot.yaml').read_text(encoding='utf-8'))))
-    assert policy.decide(1, 1, 90, 0).theta_right == 30.
+    assert policy.decide(1, 1, -36, 0).theta_right == 30.
 
 
 def test_stop_depends_only_on_distance_regardless_of_heading(cfg, robot):

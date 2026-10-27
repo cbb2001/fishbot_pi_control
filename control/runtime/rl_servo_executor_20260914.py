@@ -74,6 +74,9 @@ class RLStartedAction:
 
 @dataclass
 class RLHoldAcknowledgement:
+    agents: tuple | None = None
+    center: bool | None = None
+    terminal: bool = False
     ack_t_ns: int | None = None
     cancelled: list = field(default_factory=list)
     angles_deg: dict = field(default_factory=dict)
@@ -115,6 +118,9 @@ class RLServoExecutor:
         self._completed = queue.Queue()
         self._next_id = 0
         self._request_lock = threading.Lock()
+        self._blocked_agents = set()
+        self._terminal_requested = False
+        self._terminal_centered = False
         self._pending = deque()
         self._recorded_actions = set()
         self.last_lateness_us = 0.
@@ -131,19 +137,44 @@ class RLServoExecutor:
         if agent != expected:
             raise ValueError('agent/action mismatch')
         with self._request_lock:
-            if self.stop_event.is_set() or self.shutdown_event.is_set():
+            if (self.stop_event.is_set() or self.shutdown_event.is_set()
+                    or self._terminal_requested or agent in self._blocked_agents):
                 raise RuntimeError('servo executor stopped')
             self._next_id += 1
             self._requests.put(_Request(self._next_id, agent, action, context))
             return self._next_id
 
-    def request_hold(self):
-        ticket = RLHoldAcknowledgement()
+    def request_hold(self, *, agents=None, center=None, block=False):
+        groups = None if agents is None else tuple(agents)
+        if groups is not None and (not groups or not set(groups) <= {'tail', 'fin'}):
+            raise ValueError('unknown servo group')
+        ticket = RLHoldAcknowledgement(agents=groups, center=center)
         with self._request_lock:
-            if self.stop_event.is_set() or self.shutdown_event.is_set():
+            if self.stop_event.is_set() or self.shutdown_event.is_set() or self._terminal_requested:
                 raise RuntimeError('servo executor stopped')
+            if block:
+                self._blocked_agents.update(groups or ('tail', 'fin'))
             self._requests.put(ticket)
         return ticket
+
+    def resume_agents(self, agents):
+        """主线程须先确认归中回执，再恢复该组提交。"""
+        with self._request_lock:
+            if self._terminal_requested or self.stop_event.is_set() or self.shutdown_event.is_set():
+                raise RuntimeError('servo executor stopped')
+            self._blocked_agents.difference_update(agents)
+
+    def request_center_stop(self):
+        """截止线程只排请求：同一锁内封口，PWM 线程归中并退出。"""
+        with self._request_lock:
+            if self._terminal_requested:
+                return self._terminal_ticket
+            if self.stop_event.is_set() or self.shutdown_event.is_set():
+                raise RuntimeError('servo executor stopped')
+            self._terminal_requested = True
+            self._terminal_ticket = RLHoldAcknowledgement(center=True, terminal=True)
+            self._requests.put(self._terminal_ticket)
+            return self._terminal_ticket
 
     @staticmethod
     def _drain(q):
@@ -240,16 +271,31 @@ class RLServoExecutor:
         try:
             now = self.clock_ns()
             # 一次直接写中位，不排队回中动作，也不插值；成功后取消旧轨迹及待执行动作。
-            refs = (self.scheduler.centers if self.config.hold_at_center
-                    else self.scheduler.references_at(now))
+            centered = self.config.hold_at_center if ticket.center is None else ticket.center
+            groups = ticket.agents or ('tail', 'fin')
+            selected = set()
+            for group in groups:
+                selected.update(TAIL_SERVO_IDS if group == 'tail' else FIN_SERVO_IDS)
+            selected.intersection_update(self.active_servo_ids)
+            refs = self.scheduler.references_at(now)
+            if centered:
+                refs.update({sid:self.scheduler.centers[sid] for sid in selected})
             refs = {sid:refs[sid] for sid in self.active_servo_ids}
             ack = self._write(refs)
-            ticket.cancelled = self.scheduler.hold(refs)
-            ticket.cancelled.extend(self._pending)
-            self._pending.clear()
-            self._recorded_actions.clear()
-            self.tracker.record_reference_segment(ack, ack, refs, refs, phase='hold')
+            if ticket.agents is None:
+                ticket.cancelled = self.scheduler.hold(refs)
+            else:
+                ticket.cancelled = self.scheduler.hold_groups(refs, groups)
+            ticket.cancelled.extend(r for r in self._pending if r.agent in groups)
+            self._pending = deque(r for r in self._pending if r.agent not in groups)
+            for item in ticket.cancelled:
+                self._recorded_actions.discard(id(item))
+            held = {sid:refs[sid] for sid in selected}
+            self.tracker.record_reference_segment(ack, ack, held, held, phase='hold')
             ticket.ack_t_ns, ticket.angles_deg = ack, refs
+            if ticket.terminal:
+                self._terminal_centered = True
+                self.stop_event.set()
         except BaseException as exc:
             ticket.failure = exc
             raise
@@ -349,7 +395,8 @@ class RLServoExecutor:
         finally:
             if controller_ready:
                 # 故障时不再移动回中，避免低电压、过流或未知姿态下继续施力。
-                if self.failure is None and not self.emergency_event.is_set() and not self.shutdown_event.is_set():
+                if (self.failure is None and not self.emergency_event.is_set()
+                        and not self.shutdown_event.is_set() and not self._terminal_centered):
                     try:
                         self._recenter()
                     except BaseException as exc:

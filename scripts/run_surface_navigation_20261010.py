@@ -3,6 +3,9 @@
 
 UWB与test_uwb_20261014.py共用SensorManager/UWBWorker，以CRLF按行读取。
 先在config/robot.yaml的surface_navigation_20261010中填写L/W/x_d/y_d。
+标定航向最短角差>=45°时循环action1(30,t_0)、action1(20,t_0)；
+角差<=-45°时循环action1(-30,t_0)、action1(-20,t_0)，|角差|<45°恢复PI。
+每个动作结束后检查最新IMU；动作幅值仍受theta_max和舵机物理限位约束。
 模拟：python scripts/run_surface_navigation_20261010.py --dry-run --L 4 --W 3 --x-d 3 --y-d 1 --t1 0 --t2 .5 --max-control-s 3
 实机：python scripts/run_surface_navigation_20261010.py --confirm MOVE
 多点：python scripts/run_surface_navigation_20261010.py --waypoint 3 1 30 --waypoint 5 2 40 --confirm MOVE
@@ -34,7 +37,7 @@ def main():
         'H': '基站天线与水面标签天线的垂直高度差，米，非负；本场地1.93',
         'L': 'A0到A1长度，米', 'W': 'A0到A3宽度，米', 'x_d': '目标x，米', 'y_d': '目标y，米',
         'theta_max': '最大尾鳍幅值，<=30度', 'theta_0': '左摆基础幅值，非负',
-        'theta_00': '右摆基础幅值，非负，可与theta_0不同', 't_0': '每个action1时长；0直接写目标',
+        'theta_00': '右摆基础幅值，非负，可与theta_0不同', 't_0': 'PI及大角差转向的每个action1时长；0直接写目标',
         't1': '人工放置等待秒数', 't2': '静止IMU标定秒数', 'kp': 'PI比例增益，非负',
         't': '定点保持总时长（秒，包含到点暂停）；到时退出；默认不限时',
         'ki': 'PI积分增益，非负，单位1/s', 'delta_yaw': '兼容旧参数；已不参与到点暂停判定',

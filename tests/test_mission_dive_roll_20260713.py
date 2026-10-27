@@ -168,11 +168,13 @@ class DiveRollValidationTests(DiveRollTestCase):
     def test_old_max_test_amplitude_does_not_restrict_combined_targets(self) -> None:
         config = copy.deepcopy(self.config)
         config["safety"]["servo"]["max_test_amplitude_deg"] = 0.001
+        raw = {s['servo_id']:s for s in config['servo']['channels']}
+        tilt = min(raw[5]['max_angle']-raw[5]['center_angle'],raw[7]['center_angle']-raw[7]['min_angle'])
         args = mission.parse_args(
             config,
             [
                 "--root-amplitude-ratio", "1",
-                "--dive-pectoral-tilt", "90",
+                "--dive-pectoral-tilt", str(tilt),
                 "--tail-left-amplitude-deg", "30",
                 "--tail-right-amplitude-deg", "30",
             ],
@@ -181,8 +183,8 @@ class DiveRollValidationTests(DiveRollTestCase):
         targets = mission._prepare_targets(config, args)
 
         self.assertNotIn("max_test_amplitude_deg", targets)
-        self.assertEqual(targets["dive_pose_by_servo_id"][5], 180.0)
-        self.assertEqual(targets["dive_pose_by_servo_id"][7], 0.0)
+        self.assertEqual(targets["dive_pose_by_servo_id"][5], raw[5]['center_angle']+tilt)
+        self.assertEqual(targets["dive_pose_by_servo_id"][7], raw[7]['center_angle']-tilt)
         for servo_id in mission.TAIL_SERVO_IDS:
             self.assertEqual(
                 targets["tail"][servo_id]["left_target"],
@@ -204,15 +206,17 @@ class DiveRollValidationTests(DiveRollTestCase):
         )
 
     def test_dive_tilt_just_outside_tip_limits_is_rejected_preflight(self) -> None:
-        args = self.make_args("--dive-pectoral-tilt", "90.1")
+        servo = next(s for s in self.config['servo']['channels'] if s['servo_id']==5)
+        tilt = servo['max_angle']-servo['center_angle']+.1
+        args = self.make_args("--dive-pectoral-tilt", str(tilt))
         mission._validate_scalar_args(args)
         with self.assertRaises(SystemExit) as caught:
             mission._prepare_targets(self.config, args)
         message = str(caught.exception)
         self.assertIn("servo_id=5", message)
-        self.assertIn("--dive-pectoral-tilt=90.100", message)
-        self.assertIn("calculated target=180.100", message)
-        self.assertIn("0.000..180.000", message)
+        self.assertIn(f"--dive-pectoral-tilt={tilt:.3f}", message)
+        self.assertIn(f"calculated target={servo['max_angle']+.1:.3f}", message)
+        self.assertIn(f"{servo['min_angle']:.3f}..{servo['max_angle']:.3f}", message)
 
     def test_invalid_dive_duration_tilt_and_transition_are_rejected(self) -> None:
         invalid_cases = (
