@@ -8,7 +8,7 @@ import queue
 import threading
 import time
 from collections import deque
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import numpy as np
@@ -24,7 +24,10 @@ from .rl_servo_state_tracker_20260914 import RLServoStateTracker
 from .sensor_manager import SensorManager
 from .sensor_worker import BaseSensorWorker
 from .surface_navigation_20261010 import CalibratedIMU, NavigationPolicy, NavigationTailAction, UWBStreamDecoder
-from .underwater_navigation_20261026 import UnderwaterScheduler, InertialEstimator, StableUWB, UWBObservation, forward_tid
+from .underwater_navigation_20261026 import (
+    UnderwaterScheduler, NavigationEstimator, AcceptedUWB, SurfaceFinPolicy, UWBObservation, forward_tid,
+    validate_safety_depth,
+)
 
 
 def calibrate_window(cfg,imus,depths,end_ns):
@@ -76,38 +79,73 @@ class NavigationMission:
     """非阻塞控制阶段。只有 PWM 完成回执才能推进半程；每组最多一个在途请求。"""
     def __init__(self,cfg,calibration,executor,event):
         self.cfg,self.calibration,self.ex,self.event=cfg,calibration,executor,event
+        self.waypoints=cfg.route; self.waypoint_index=0; self.waypoint_start=None
         self.phase='initial_fix'; self.stage_start=0; self.motion_start=None; self.segment_start=None
+        # 初始化时尚不运动；首段目标在 enter_navigation 中加载。
+        # 保留此基类初始化接口，兼容拥有独立三元点表和 target 属性的 fixed-yaw 分支。
         self.depth=0.; self.depth_t=None; self.depth_policy=self._depth_policy(cfg.h0)
         self.nav_policy=NavigationPolicy(cfg.navigation,calibration)
         self.inflight={'tail':None,'fin':None}; self.epoch=0
         self.tail_side=0; self.tail_mode=None; self.tail_held=False; self.tail_ticket=None
         self.center_ticket=None; self.center_purpose=None; self.center_requested_ns=None
-        self.pressure_paused=False; self.resume_count=0; self.reason=None
-        self.signal_gate=StableUWB(cfg)
+        self.surface_policy=None; self.surface_depth=0.; self.reason=None
+
+    @property
+    def target(self):
+        return self.waypoints[self.waypoint_index]
+
+    def _navigation_policy(self):
+        return NavigationPolicy(replace(self.cfg.navigation,x_d=self.target.x,y_d=self.target.y),self.calibration)
 
     def _depth_policy(self,target):
         last=self.ex.scheduler.fin_sequence.last_b2
         return FixedDivePolicy(self.calibration,h0=target,k=self.cfg.depth_kp,ki=self.cfg.depth_ki,
              initial_b2=-last if last else self.cfg.initial_b2,action_duration_s=self.cfg.fin_duration_s,
-             error_scale_m=self.cfg.h0,max_integral_gap_s=self.cfg.pressure_timeout_s)
+             error_scale_m=target if target>0 else self.cfg.h0,max_integral_gap_s=self.cfg.pressure_timeout_s)
+
+    def _reset_controls(self,now):
+        """切目标只清控制器积分；位置/EKF、总时钟及上浮时钟均由外层保留。"""
+        self.depth_policy=self._depth_policy(self.target.h); self.depth_policy.start_control(now)
+        self.nav_policy=self._navigation_policy()
+        self.tail_side=0; self.tail_mode=None; self.tail_held=False; self.tail_ticket=None
+
+    def _waypoint_started(self,now):
+        self.waypoint_start=now
+        self.event('waypoint_started',waypoint_index=self.waypoint_index+1,
+                   target=[self.target.x,self.target.y,self.target.h],timeout_s=self.target.t,start_t_ns=now)
+
+    def _advance_waypoint(self,now,xyz):
+        """点的时限含上浮/等UWB；暂停时不能拿冻结的惯性位置判断新到达。"""
+        changed=False
+        while self.waypoint_start is not None and self.target.t is not None:
+            distance=math.hypot(xyz[0]-self.target.x,xyz[1]-self.target.y)
+            reached=self.phase=='navigate' and distance<=self.cfg.navigation.delta_s
+            expired=now-self.waypoint_start>=round(self.target.t*1e9)
+            if not reached and not expired: break
+            self.event('waypoint_completed',waypoint_index=self.waypoint_index+1,
+                       target=[self.target.x,self.target.y,self.target.h],timeout_s=self.target.t,
+                       start_t_ns=self.waypoint_start,completed_t_ns=now,
+                       reason='reached' if reached else 'timeout',distance_m=distance)
+            self.waypoint_index+=1; self._waypoint_started(now); changed=True
+            # 同一有效位置可以覆盖连续的多个目标；遇到 null 立即停止切段。
+        if changed and self.phase=='navigate':
+            self._center(now,'waypoint')
+        return changed
 
     def enter_navigation(self,now):
         self.phase='navigate'; self.stage_start=self.segment_start=now
         if self.motion_start is None: self.motion_start=now
-        self.depth_policy=self._depth_policy(self.cfg.h0); self.depth_policy.start_control(now)
-        self.nav_policy=NavigationPolicy(self.cfg.navigation,self.calibration)
+        if self.waypoint_start is None: self._waypoint_started(now)
+        self._reset_controls(now)
         self.ex.resume_agents(('tail','fin')); self.epoch+=1
         self.inflight={'tail':None,'fin':None}; self.tail_side=0; self.tail_mode=None
-        self.tail_held=False; self.pressure_paused=False; self.resume_count=0
+        self.tail_held=False; self.surface_policy=None
         self.event('navigation_started',segment_start_t_ns=now,motion_start_t_ns=self.motion_start)
 
     def on_depth(self,t,depth):
         if self.depth_t is not None and t<=self.depth_t: return
         self.depth_t=t; self.depth=depth
-        control_depth=max(depth,0.) if self.phase=='surface' else depth
-        self.depth_policy.observe_depth(control_depth,t)
-        if self.pressure_paused:
-            self.resume_count=self.resume_count+1 if depth>self.cfg.resume_depth_m else 0
+        if self.phase=='navigate': self.depth_policy.observe_depth(depth,t)
 
     def _center(self,now,purpose):
         if self.center_ticket is None:
@@ -116,7 +154,10 @@ class NavigationMission:
         self.center_purpose=purpose
 
     def on_uwb(self,obs,now):
-        if self.phase=='surface' and self.signal_gate.signal(obs,now): self._center(now,'acquire')
+        if (self.phase=='surface' and obs.t_ns>self.stage_start
+                and 0<=now-obs.t_ns<=self.cfg.uwb_age_s*1e9
+                and any(v is not None and math.isfinite(v) and v>0 for v in obs.frame.ranges_m)):
+            self._center(now,'acquire')
 
     def _completions(self):
         for item in self.ex.drain_completed():
@@ -124,7 +165,9 @@ class NavigationMission:
                 self.event('late_completion_ignored',request_id=item.request_id,agent=item.agent)
                 continue
             self.inflight[item.agent]=None
-            if item.agent=='fin': self.depth_policy.acknowledge(item.action)
+            if item.agent=='fin':
+                policy=self.surface_policy if self.surface_policy is not None else self.depth_policy
+                policy.acknowledge(item.action)
             else: self.tail_side=1-self.tail_side
             self.event('action_completed',agent=item.agent,request_id=item.request_id,
                        action=asdict(item.action),completion_t_ns=item.completion_t_ns)
@@ -155,35 +198,38 @@ class NavigationMission:
                 self.phase='acquire'; self.stage_start=ticket.ack_t_ns
                 self.event('uwb_acquire_started',center_ack_t_ns=ticket.ack_t_ns)
                 return
-            self.pressure_paused=True; self.resume_count=0
-            self.depth_policy=self._depth_policy(0)
-            self.event('surface_pressure_paused',center_ack_t_ns=ticket.ack_t_ns)
+            if self.center_purpose=='waypoint':
+                self._reset_controls(now)
+                self.ex.resume_agents(('tail','fin'))
+                self.event('waypoint_control_started',waypoint_index=self.waypoint_index+1,
+                           center_ack_t_ns=ticket.ack_t_ns)
+            else:
+                self.surface_policy=SurfaceFinPolicy(self.calibration,self.cfg.fin_duration_s,
+                    self.cfg.initial_b2,self.ex.scheduler.fin_sequence.last_b2)
+                self.ex.resume_agents(('fin',))
+                self.event('surface_sequence_started',center_ack_t_ns=ticket.ack_t_ns,
+                           servo4_max_deg=self.calibration.limits[4][1],
+                           servo4_min_deg=self.calibration.limits[4][0])
         if self.phase=='navigate' and now-self.segment_start>=self.cfg.t4*1e9:
-            self.phase='surface'; self.stage_start=now; self.signal_gate.reset(now)
-            self.tail_ticket=self.ex.request_hold(agents=('tail',),center=True,block=True)
+            self.phase='surface'; self.stage_start=now
+            self.surface_depth=self.depth
+            # 取消旧定深动作并归中，收到回执后从b1=0开始固定上浮序列。
+            self._center(now,'surface')
             self.event('surface_started',depth_m=self.depth)
+            return
+        # t4/上浮归中优先；切点绝不绕过上浮与 n 帧平均定位的阶段约束。
+        if self._advance_waypoint(now,xyz) and self.phase=='navigate': return
         if self.phase=='acquire':
-            if now-self.stage_start>=self.cfg.fix_timeout_s*1e9: self.reason='fix_timeout'
+            # 一直等待合格四路帧，仅总任务t3/外部停止/安全故障可结束。
             return
         if self.phase=='surface':
-            if now-self.stage_start>=self.cfg.surface_timeout_s*1e9:
-                self.reason='surface_timeout'; return
-            if self.pressure_paused:
-                if self.resume_count<self.cfg.resume_depth_samples: return
-                self.pressure_paused=False; self.resume_count=0
-                self.depth_policy=self._depth_policy(0); self.depth_policy.start_control(now)
-                self.ex.resume_agents(('fin',)); self.event('surface_pressure_resumed')
-            if not self.depth_policy.pair_active:
-                if self.depth_policy.h0!=0:
-                    self.depth_policy.set_target(0,error_scale_m=self.cfg.h0)
-                    self.depth_policy.start_control(now)
-                if self.depth<=0:
-                    self._center(now,'pressure'); return
-        if self.phase not in ('navigate','surface'): return
-        if self.inflight['fin'] is None:
-            action=self.depth_policy.next_action(max(self.depth,0) if self.phase=='surface' else self.depth)
-            if action is not None: self._submit('fin',action)
+            if self.inflight['fin'] is None:
+                self._submit('fin',self.surface_policy.next_action())
+            return
         if self.phase!='navigate': return
+        if self.inflight['fin'] is None:
+            action=self.depth_policy.next_action(self.depth)
+            if action is not None: self._submit('fin',action)
         decision=self.nav_policy.decide(xyz[0],xyz[1],yaw,now)
         if decision.reached:
             if not self.tail_held and self.tail_ticket is None:
@@ -244,8 +290,8 @@ class UnderwaterMockSensors(SensorManager):
     def sim_depth(self):
         if self.mission is None: return 0.
         m=self.mission
-        if m.phase=='navigate': return min(self.cfg.h0,(time.monotonic_ns()-m.segment_start)/1e9*.2)
-        if m.phase=='surface': return max(0.,min(self.cfg.h0,self.cfg.t4*.2)-(time.monotonic_ns()-m.stage_start)/1e9*.3)
+        if m.phase=='navigate': return min(m.target.h,(time.monotonic_ns()-m.segment_start)/1e9*.2)
+        if m.phase=='surface': return max(0.,m.surface_depth-(time.monotonic_ns()-m.stage_start)/1e9*.3)
         return 0.
 
     def _create_mock_workers(self):
@@ -255,7 +301,8 @@ class UnderwaterMockSensors(SensorManager):
 def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None,sensors=None,controller=None):
     if dry_run and no_servo: raise ValueError('dry-run 与 no-servo 不能同时使用')
     cal=build_calibration(robot)
-    if cfg.h0>=float(robot['safety']['max_depth_m']): raise ValueError('h0 必须低于安全深度')
+    SurfaceFinPolicy(cal,cfg.fin_duration_s,cfg.initial_b2)  # 采集/PWM前校验完整上浮行程。
+    validate_safety_depth(cfg,robot['safety']['max_depth_m'])
     stop=stop_event or threading.Event(); session=Path(session); session.mkdir(parents=True,exist_ok=True)
     prepare_raw_placeholders(session)
     drift=PressureDrift(Path(__file__).resolve().parents[2]/cfg.pressure_drift_file)
@@ -284,7 +331,8 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
     failures=queue.Queue()
     ex=RLServoExecutor(controller,UnderwaterScheduler(cal),RLServoStateTracker(cal),
         # 归中是阶段约定的直接写中位；运动时序/PWM频率读取本次配置。
-        config={'command_hz':cfg.command_hz,'safe_recenter_s':0.,'initial_move_s':0.,'hold_at_center':True},
+        config={'command_hz':cfg.command_hz,'safe_recenter_s':0.,'initial_move_s':0.,'hold_at_center':True,
+                'terminal_center_hold_s':cfg.center_settle_s},
         shutdown_event=stop,failure_queue=failures,
         servo_id_to_channel={i:int(v['channel']) for i,v in cal.servos.items()})
     safety={'runtime':{'safety_poll_interval_s':cfg.safety_poll_s,'sensor_ready_timeout_s':cfg.ready_timeout_s},
@@ -299,20 +347,33 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
     reason='stopped'; fault=None; cleanup_errors=[]; start=time.monotonic_ns()
     calibration_start=start+round(cfg.t1*1e9); calibration_end=calibration_start+round(cfg.t2*1e9)
     initial_deadline=calibration_end+round(cfg.fix_timeout_s*1e9); initial_centered=False
-    gate=StableUWB(cfg); decoder=UWBStreamDecoder(cfg.navigation.uwb_tag)
+    gate=AcceptedUWB(cfg); decoder=UWBStreamDecoder(cfg.navigation.uwb_tag)
     last_seq={n:None for n in ('imu','depth','uwb')}; pending=[]; last_processed=-1
     calibration_rows={'imu':[],'depth':[]}; last_tid=None
     decoded_ids=deque(maxlen=512)
     after_calibration=[]
-    recent_imus=deque(); recent_depths=deque(); last_status=0; gate_phase=None; diagnostic_start=None
+    last_status=0; gate_phase=None; diagnostic_start=None
     last_range_ns=None; valid_ranges=0; last_complete_uwb_ns=None
 
     def write(name,**data):
         current_phase=mission.phase if mission is not None else phase
-        if not logs[name].write(dict(t_ns=time.monotonic_ns(),phase=current_phase,**data)):
+        target=mission.target if mission else cfg.route[0]
+        row=dict(t_ns=time.monotonic_ns(),phase=current_phase,
+                 waypoint_index=mission.waypoint_index+1 if mission else 1,
+                 waypoint_count=len(cfg.route),target=[target.x,target.y,target.h])
+        row.update(data)
+        if not logs[name].write(row):
             raise RuntimeError(f'{name} 日志队列满')
 
     def event(kind,**data):
+        # 阶段事件同步控制积分开关；截止时刻也按采样时间检查，不能跨越t4积分。
+        if estimator is not None:
+            if kind=='navigation_started':
+                end=min(data['segment_start_t_ns']+round(cfg.t4*1e9),
+                        data['motion_start_t_ns']+round(cfg.t3*1e9))
+                estimator.start_navigation(data['segment_start_t_ns'],end)
+            elif kind=='surface_started':
+                estimator.pause_navigation(mission.stage_start)
         write('events',event=kind,**data)
         if kind.startswith('action_'): write('commands',event=kind,**data)
 
@@ -338,38 +399,41 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
                 timeout_s=float(sensor_cfg['sensors']['vision']['timeout_ms'])/1000,
                 ready_timeout_s=cfg.ready_timeout_s)
 
-    def update_bias(fix,now):
-        if (not cfg.auto_bias or no_servo or not initial_centered
-                or phase not in ('initial_fix','acquire')
-                or np.linalg.norm(fix.velocity)>=cfg.bias_speed_mps
-                or fix.quality['max_half_speed_mps']>=cfg.bias_speed_mps
-                or fix.quality['span_s']<.9*cfg.bias_window_s): return
-        threshold=fix.t_ns-round(cfg.bias_window_s*1e9)
-        if threshold<gate.boundary: return  # 零偏窗口必须完全位于归中静置之后。
-        ims=[s for s in recent_imus if threshold<=s.t_ns<=fix.t_ns]
-        ds=[d for t,d in recent_depths if threshold<=t<=fix.t_ns]
-        if (len(ims)<cfg.calibration_sample_ratio*cfg.bias_window_s*cfg.imu_rate_hz
-                or len(ds)<cfg.calibration_sample_ratio*cfg.bias_window_s*cfg.pressure_rate_hz
-                or not ims or ims[-1].t_ns-ims[0].t_ns<cfg.calibration_coverage_ratio*cfg.bias_window_s*1e9): return
-        residual=np.array([sensor_cal.linear_acceleration(s.data) for s in ims])
-        if (max(np.linalg.norm(s.data['gyro_radps']) for s in ims)>=cfg.bias_gyro_radps
-                or max(np.std(residual,axis=0))>=cfg.bias_acc_std_mps2 or np.std(ds)>=cfg.bias_depth_std_m): return
-        delta=np.clip(cfg.bias_gain*(np.mean(residual,axis=0)-estimator.bias),-cfg.bias_step_mps2,cfg.bias_step_mps2)
-        estimator.bias+=delta
-        event('static_bias_updated',delta=delta.tolist(),b_body=estimator.bias.tolist())
+    def accept_fix(fix,*,used_for_correction):
+        gate.commit(fix)
+        saved=asdict(fix); saved['fix_t_ns']=saved.pop('t_ns')
+        event('uwb_accepted',used_for_correction=used_for_correction,**saved)
+
+    def sync_acquire_gate():
+        nonlocal phase,gate_phase
+        phase=mission.phase
+        if phase=='acquire' and gate_phase!=mission.stage_start:
+            gate_phase=mission.stage_start
+            gate.reset(mission.stage_start)  # 保留上一组平均参照；归中后重新累计n帧。
 
     def apply_fix(fix,now):
-        try: innovation=estimator.correct(fix.t_ns,fix.xy,fix.velocity)
+        try: innovation=estimator.apply_surface_fix(fix,now)
         except ValueError as exc:
             event('fix_rejected',detail=str(exc)); return False
         event('position_corrected',fix_t_ns=fix.t_ns,xy=fix.xy,velocity=fix.velocity,
+              xyz=estimator.xyz,accel_filter_reset=True,integration_reset=True,
+              relative_xy=estimator.relative_xy,relative_xyz=estimator.relative_xyz,ekf=innovation['ekf'],
+              frame_id=fix.frame_id,ranges_m=fix.ranges_m,
               innovation=innovation,quality=fix.quality,age_s=(now-fix.t_ns)/1e9)
-        update_bias(fix,now)
+        accept_fix(fix,used_for_correction=True)
         return True
 
     try:
         write_metadata_yaml(session/'metadata.yaml',{'task':'underwater_navigation_20261026','config':asdict(cfg),
             'robot':sensor_cfg,'dry_run':dry_run,'no_servo':no_servo,'z_positive':'down',
+            'waypoints':[asdict(point) for point in cfg.route],
+            'waypoint_reached_mode':'horizontal_distance_only',
+            'waypoint_time_includes_surface_and_acquire':True,
+            'uwb_fix_mode':'mean_valid_ranges','uwb_average_frames':cfg.uwb_average_frames,
+            'uwb_surface_depth_m':0.,'uwb_velocity_reset':'horizontal_zero_at_fix',
+            'uwb_accel_filter_reset':'both_stages_zero_at_fix','imu_integration_mode':'navigate_only',
+            'ekf_state_order':['x','y','z','vx','vy','vz','bx','by','bz'],
+            'ekf_z_positive':'down','linear_acc_z_positive':'up',
             'camera_note':'dry-run 不产生真实相机图像' if dry_run else '相机开关/存图按 sensors.vision 配置'})
         (session/'pressure_drift.json').write_text(json.dumps(drift.config,ensure_ascii=False),encoding='utf8')
         raw.start()
@@ -423,13 +487,18 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
                     continue
                 if name=='imu':
                     if estimator.imu(t,data):
-                        heading.update(data,t); recent_imus.append(sample)
+                        heading.update(data,t)
                         write('imu_filtered',sample_t_ns=t,xyz=estimator.xyz,velocity=estimator.v.tolist(),
                               raw_linear_acc=estimator.raw_acc.tolist(),filtered_acc=estimator.filtered_acc,
-                              b_body=estimator.bias.tolist(),yaw_deg=heading.values['yaw_deg'])
+                              b_body=estimator.bias.tolist(),yaw_deg=heading.values['yaw_deg'],
+                              integrating=estimator.integrating,relative_xy=estimator.relative_xy,
+                              relative_xyz=estimator.relative_xyz,ekf_bias_mps2=estimator.ekf.x[6:].tolist(),
+                              ekf_variance=np.diag(estimator.ekf.P).tolist())
                 elif name=='depth':
                     depth=depth_cal.depth_m(data['pressure_pa']); estimator.pressure(t,depth)
-                    recent_depths.append((t,depth))
+                    if estimator.integrating:
+                        write('navigation',event='pressure_ekf_update',sample_t_ns=t,pressure_depth_m=depth,
+                              xyz=estimator.xyz,quality=estimator.ekf.last_pressure_update)
                     if mission: mission.on_depth(t,depth)
                 elif name=='uwb':
                     raw_bytes=bytes.fromhex(data.get('raw_hex',''))
@@ -439,21 +508,28 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
                         last_range_ns=t; valid_ranges=sum(v is not None for v in frame.ranges_m)
                         if valid_ranges==4: last_complete_uwb_ns=t
                         obs=UWBObservation(t,frame,estimator.depth_at(t))
-                        if mission and not no_servo: mission.on_uwb(obs,now)
-                        if phase in ('initial_fix','acquire','diagnostic') and t>gate.boundary:
+                        if mission and not no_servo:
+                            # 回执可能在本批传感器样本处理期间到达；首个归中后完整帧不能丢掉。
+                            ticket=mission.center_ticket
+                            if (ticket is not None and ticket.is_set()
+                                    and mission.center_purpose=='acquire'):
+                                mission.tick(now,estimator.xyz,heading.values['yaw_deg'])
+                                sync_acquire_gate()
+                            mission.on_uwb(obs,now)
+                        awaiting_initial_center=phase=='initial_fix' and executor_started and not initial_centered
+                        if (phase in ('initial_fix','acquire','diagnostic') and t>gate.boundary
+                                and not fixes and not awaiting_initial_center):
                             fix=gate.add(obs,now)
                             if fix is not None: fixes.append(fix)
                             write('navigation',event='uwb_quality',sample_t_ns=t,frame_id=frame.frame_id,
                                   valid_ranges=sum(v is not None for v in frame.ranges_m),reason=gate.reason,
                                   quality=gate.quality)
-            while recent_imus and recent_imus[0].t_ns<now-round(cfg.history_s*1e9): recent_imus.popleft()
-            while recent_depths and recent_depths[0][0]<now-round(cfg.history_s*1e9): recent_depths.popleft()
             if estimator is None and now>=calibration_end+round((cfg.merge_delay_s+cfg.control_poll_s)*1e9):
                 sensor_cal,bias,heading=calibrate_window(cfg,calibration_rows['imu'],calibration_rows['depth'],calibration_end)
                 depth_cal=FixedDepthCalibration(sensor_cal,sensor_cal.water_density_kg_m3*sensor_cal.gravity_mps2,drift)
                 guard.calibration=depth_cal
-                estimator=InertialEstimator(cfg,bias,heading.zeros['yaw_deg'],sensor_cal.gravity_mps2)
-                # 标定末端给滤波器起点，后面的样本都逐条传播。
+                estimator=NavigationEstimator(cfg,bias,heading.zeros['yaw_deg'],sensor_cal.gravity_mps2)
+                # 保持采集/健康监测，只有 navigation_started 后才传播位置速度。
                 last_i=calibration_rows['imu'][-1]; last_d=calibration_rows['depth'][-1]
                 for s in sorted((last_i,last_d),key=lambda s:s.t_ns):
                     if s.name=='imu': estimator.imu(s.t_ns,s.data); heading.update(s.data,s.t_ns)
@@ -461,7 +537,7 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
                 state={**depth_cal.state_dict(),'b_body':bias.tolist(),'heading':heading.diagnostics}
                 (session/'calibration.json').write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf8')
                 event('calibration_completed',imu_samples=len(calibration_rows['imu']),depth_samples=len(calibration_rows['depth']))
-                # 在标定完成前已经排出的窗口后样本重新排队，避免漏积分。
+                # 标定后已排出的样本重新排队；初始定位期间仍不积分。
                 pending.extend(after_calibration); after_calibration.clear()
                 last_processed=calibration_end
                 phase='diagnostic' if no_servo else 'initial_fix'
@@ -476,51 +552,59 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
             if phase=='initial_fix':
                 if now>=initial_deadline: reason='initial_fix_timeout'; break
                 if fixes and not executor_started:
+                    accept_fix(fixes[0],used_for_correction=False)
                     ex.start(); executor_started=True
                     event('pwm_start_requested')
                 if executor_started and not initial_centered and ex.wait_ready(0):
                     guard.executor_started=True; initial_centered=True
-                    boundary=ex.last_write_ack_t_ns+round(cfg.settle_s*1e9)
+                    boundary=ex.last_write_ack_t_ns
                     gate.reset(boundary); decoder.reset_partial(); fixes=[]
                     event('initial_center_confirmed',center_ack_t_ns=ex.last_write_ack_t_ns)
-                if initial_centered and fixes and apply_fix(fixes[-1],now):
+                if initial_centered and fixes and apply_fix(fixes[0],now):
                     mission=NavigationMission(cfg,cal,ex,event)
                     latest=corrected.buffers['depth'].latest()
                     mission.on_depth(latest.t_ns,depth_cal.depth_m(latest.data['pressure_pa']))
                     mission.enter_navigation(now); arm_timer(); phase=mission.phase
                     if isinstance(sensors,UnderwaterMockSensors): sensors.mission=mission
             elif phase=='diagnostic':
-                if fixes and apply_fix(fixes[-1],now): gate.reset(fixes[-1].t_ns)
+                if fixes and apply_fix(fixes[0],now): gate.reset(fixes[0].t_ns)
             elif mission:
-                if phase=='acquire' and fixes and apply_fix(fixes[-1],now): mission.enter_navigation(now)
                 if now-mission.motion_start>=cfg.t3*1e9:
                     # 与独立定时器使用同一正常停止入口，避免监测线程误报预期退出。
                     expire(); reason='time_limit'; break
-                try: mission.tick(now,estimator.xyz,heading.values['yaw_deg'])
+                try:
+                    if phase=='acquire' and fixes and apply_fix(fixes[0],now): mission.enter_navigation(now)
+                    mission.tick(now,estimator.xyz,heading.values['yaw_deg'])
                 except RuntimeError:
                     if deadline.is_set(): reason='time_limit'; break
                     raise
-                phase=mission.phase
-                if phase=='acquire' and gate_phase!=mission.stage_start:
-                    gate_phase=mission.stage_start
-                    gate.reset(mission.stage_start+round(cfg.settle_s*1e9)); decoder.reset_partial()
-                    recent_imus.clear(); recent_depths.clear()
+                sync_acquire_gate()
                 if mission.reason: reason=mission.reason; break
             if now-last_status>=1e9/cfg.status_hz:
                 last_status=now
                 remaining=None if timer is None else max(0,cfg.t3-(now-(diagnostic_start if no_servo else mission.motion_start))/1e9)
                 next_surface=None if not mission or phase!='navigate' else max(0,cfg.t4-(now-mission.segment_start)/1e9)
-                distance=math.hypot(estimator.xyz[0]-cfg.navigation.x_d,estimator.xyz[1]-cfg.navigation.y_d)
-                depth_target=mission.depth_policy.h0 if mission is not None else None
+                target=mission.target if mission else cfg.route[0]
+                distance=math.hypot(estimator.xyz[0]-target.x,estimator.xyz[1]-target.y)
+                depth_target=target.h if phase=='navigate' else None
+                waypoint_elapsed=None if not mission or mission.waypoint_start is None else (now-mission.waypoint_start)/1e9
+                waypoint_remaining=None if target.t is None or waypoint_elapsed is None else max(0.,target.t-waypoint_elapsed)
                 fresh_ranges=valid_ranges if last_range_ns is not None and now-last_range_ns<=cfg.uwb_age_s*1e9 else 0
                 uwb_reason=gate.reason if phase in ('initial_fix','acquire','diagnostic') else (
                     'waiting_surface_signal' if phase=='surface' else 'dead_reckoning')
                 write('navigation',event='status',xyz=estimator.xyz,velocity=estimator.v.tolist(),
-                      target=[cfg.navigation.x_d,cfg.navigation.y_d,cfg.h0],t3_remaining_s=remaining,
+                      t3_remaining_s=remaining,waypoint_elapsed_s=waypoint_elapsed,
+                      waypoint_remaining_s=waypoint_remaining,
                       t4_remaining_s=next_surface,uwb_reason=uwb_reason,distance_m=distance,
                       depth_target_m=depth_target,valid_ranges=fresh_ranges,
+                      uwb_frames_collected=len(gate.rows),uwb_frames_required=cfg.uwb_average_frames,
+                      integrating=estimator.integrating,relative_xy=estimator.relative_xy,
+                      relative_xyz=estimator.relative_xyz,ekf_bias_mps2=estimator.ekf.x[6:].tolist(),
+                      last_accepted_uwb_t_ns=None if gate.last_accepted is None else gate.last_accepted.t_ns,
                       depth_t_ns=estimator.last_depth,last_complete_uwb_t_ns=last_complete_uwb_ns)
-                print(f'[{phase}] XYZ={tuple(round(v,3) for v in estimator.xyz)} '
+                index=mission.waypoint_index+1 if mission else 1
+                print(f'[{phase}] 目标{index}/{len(cfg.route)}=({target.x:g},{target.y:g},{target.h:g}) '
+                      f'XYZ={tuple(round(v,3) for v in estimator.xyz)} '
                       f'd={distance:.3f}m h0={depth_target} t3={remaining} t4={next_surface} '
                       f'UWB={fresh_ranges}/4 {uwb_reason}',flush=True)
             stop.wait(cfg.control_poll_s)
@@ -554,6 +638,15 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
             if (reported.get('fault_code')=='SERVO_EXECUTOR_FAILED'
                     and reported.get('message')=='emergency stop: angle writes cancelled'): continue
             cleanup_errors.append(f"{reported.get('fault_code')}: {reported.get('message')}")
+        terminal_center=dict(
+            hold_s=cfg.center_settle_s,
+            command_ack_t_ns=ex.terminal_center_ack_t_ns,
+            hold_completed_t_ns=ex.terminal_center_hold_completed_t_ns,
+            pwm_disabled_t_ns=ex.pwm_disabled_t_ns,
+            target_angles_deg=cal.centers,
+        )
+        try: event('terminal_center_status',**terminal_center)
+        except Exception as exc: cleanup_errors.append(str(exc))
         try:
             sensors.stop_all(timeout=cfg.shutdown_timeout_s); raw.write_from_buffers(sensors.buffers)
             check_camera_health(sensors,now_ns=time.monotonic_ns(),started_ns=start,shutdown=True)
@@ -566,7 +659,12 @@ def run_session(robot,cfg,session,*,dry_run=False,no_servo=False,stop_event=None
     alive=sensors.alive_worker_names()
     if alive: cleanup_errors.append(f'workers still alive: {alive}')
     result=dict(reason=reason,fault=fault,cleanup_errors=cleanup_errors,session=str(session),
+                waypoint_index=None if mission is None else mission.waypoint_index+1,
+                waypoint_count=len(cfg.route),
+                target=None if mission is None else [mission.target.x,mission.target.y,mission.target.h],
+                terminal_center=terminal_center,
                 executor_started=executor_started,alive_workers=alive,pressure_origin_t_ns=drift.origin_t_ns,
+                last_accepted_uwb=None if gate.last_accepted is None else asdict(gate.last_accepted),
                 xyz=None if estimator is None else estimator.xyz)
     (session/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf8')
     return result

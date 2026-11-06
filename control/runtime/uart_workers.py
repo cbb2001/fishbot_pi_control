@@ -230,6 +230,7 @@ class IMUWorker(BaseSensorWorker):
         baudrate: int = 460800,
         timeout_s: float = 0.1,
         sample_rate_hz: float,
+        tid_modulus: int = YESENSE_TID_MODULUS,
         stop_event: threading.Event | None = None,
     ) -> None:
         super().__init__(
@@ -245,6 +246,11 @@ class IMUWorker(BaseSensorWorker):
         if float(sample_rate_hz) <= 0:
             raise ValueError("IMU sample_rate_hz must be positive.")
         self.sample_rate_hz = float(sample_rate_hz)
+        if not isinstance(tid_modulus, int) or not 2 <= tid_modulus <= YESENSE_TID_MODULUS:
+            raise ValueError("IMU tid_modulus must be an integer in [2, 65536].")
+        # Some firmware counts 1..60000. Keep wire TIDs unchanged, but use its
+        # configured period for distances, missing-frame counts and timestamps.
+        self.tid_modulus = tid_modulus
         self._sample_period_ns = max(1, int(round(1_000_000_000 / self.sample_rate_hz)))
         self._serial = None
         self._decoder = None
@@ -326,7 +332,7 @@ class IMUWorker(BaseSensorWorker):
     def _tid_gap(self, tid: int) -> int:
         if self._last_tid is None:
             return 0
-        distance = (int(tid) - self._last_tid) % YESENSE_TID_MODULUS
+        distance = (int(tid) - self._last_tid) % self.tid_modulus
         return max(0, distance - 1)
 
     def _reconstruct_timestamps(self, tids: list[int], read_done_ns: int) -> list[int]:
@@ -337,7 +343,7 @@ class IMUWorker(BaseSensorWorker):
         if last_t_ns is None:
             timestamps = [int(read_done_ns)] * len(tids)
             for index in range(len(tids) - 2, -1, -1):
-                distance = (tids[index + 1] - tids[index]) % YESENSE_TID_MODULUS
+                distance = (tids[index + 1] - tids[index]) % self.tid_modulus
                 timestamps[index] = timestamps[index + 1] - max(1, distance) * self._sample_period_ns
             return timestamps
 
@@ -348,7 +354,7 @@ class IMUWorker(BaseSensorWorker):
             if previous_tid is None:
                 distance = 1
             else:
-                distance = (tid - previous_tid) % YESENSE_TID_MODULUS
+                distance = (tid - previous_tid) % self.tid_modulus
             current_t_ns += max(1, distance) * self._sample_period_ns
             timestamps.append(current_t_ns)
             previous_tid = tid
@@ -368,7 +374,7 @@ class IMUWorker(BaseSensorWorker):
                 if previous_tid is None:
                     distance = 1
                 else:
-                    distance = (tid - previous_tid) % YESENSE_TID_MODULUS
+                    distance = (tid - previous_tid) % self.tid_modulus
                 distances.append(max(1, distance))
                 previous_tid = tid
             total_distance = sum(distances)

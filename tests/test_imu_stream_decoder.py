@@ -228,6 +228,32 @@ class YesenseStreamDecoderTests(unittest.TestCase):
 
 
 class IMUWorkerTests(unittest.TestCase):
+    def test_tid_modulus_configuration_and_manager_forwarding(self) -> None:
+        from control.runtime.sensor_manager import SENSOR_NAMES, SensorManager
+        config = {'sensors': {name: {'enabled': name == 'imu'} for name in SENSOR_NAMES}}
+        config['sensors']['imu'].update(sample_rate_hz=200,tid_modulus=60000)
+        manager = SensorManager(config,mock=False)
+        manager._create_workers()  # Constructs workers only; never starts hardware.
+        self.assertEqual(manager.workers[0].tid_modulus,60000)
+        for value in (0,65537,60000.5):
+            with self.assertRaises(ValueError):
+                IMUWorker(RingBuffer(1),sample_rate_hz=200,tid_modulus=value)
+
+    def test_configured_60000_wrap_preserves_wire_tid_and_sample_cadence(self) -> None:
+        worker, _ = make_worker([b"".join(build_frame(tid) for tid in (59999, 60000, 1, 2))])
+        worker.tid_modulus = 60000
+        samples = worker.read_once()
+        self.assertEqual([s.data['tid'] for s in samples], [59999,60000,1,2])
+        self.assertEqual([s.data['tid_gap'] for s in samples], [0,0,0,0])
+        self.assertEqual([b.t_ns-a.t_ns for a,b in zip(samples,samples[1:])], [5000000]*3)
+
+    def test_configured_60000_wrap_across_reads_and_real_missing_frame(self) -> None:
+        worker, _ = make_worker([build_frame(60000),build_frame(1),build_frame(3)])
+        worker.tid_modulus = 60000
+        a,b,c = worker.read_once()[0],worker.read_once()[0],worker.read_once()[0]
+        self.assertEqual((b.data['tid_gap'],c.data['tid_gap']),(0,1))
+        self.assertEqual((b.t_ns-a.t_ns,c.t_ns-b.t_ns),(5000000,10000000))
+
     def test_one_256_byte_read_with_prior_tail_creates_four_samples(self) -> None:
         frames = [build_frame(tid) for tid in range(20, 24)]
         worker, serial_port = make_worker([frames[0][12:] + b"".join(frames[1:])])

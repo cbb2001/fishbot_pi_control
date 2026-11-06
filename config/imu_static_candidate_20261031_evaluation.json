@@ -1,0 +1,95 @@
+{
+  "parameter_file": "config\\imu_static_candidate_20261031.json",
+  "parameter_sha256": "46a3077673ca3a691e927557cee12c52667ede0af67d6dfc68567e023818911f",
+  "selected_method": "mean180_bias",
+  "production_enabled": false,
+  "motion_validation_status": "not_tested",
+  "stationary_transfer_status": "did_not_improve_horizontal_drift_on_either_held_out_capture",
+  "recommendation": "Keep as reproducible experimental prior only; do not activate as a validated swimming calibration.",
+  "known_rest_zupt_is_not_motion_accuracy": true,
+  "hardware_runs_completed_without_actuation": true,
+  "tests": {
+    "calibration_physics": 6,
+    "decoder_and_tid": 21
+  },
+  "evaluations": {
+    "A_240s_holdout": {
+      "raw": {
+        "duration_s": 240.02499999999998,
+        "velocity_xyz_mps": [
+          0.0206823652570161,
+          -0.12616242276696737,
+          -0.5456217323176697
+        ],
+        "displacement_xyz_m": [
+          1.9860980597383464,
+          -15.278354776212556,
+          -59.681620943016206
+        ],
+        "speed_xy_mps": 0.12784645928243626,
+        "displacement_xy_m": 15.406904626520975,
+        "speed_3d_mps": 0.5603996715991102,
+        "displacement_3d_m": 61.63820721400473,
+        "max_displacement_xy_m": 15.406904626520975
+      },
+      "candidate": {
+        "duration_s": 240.02499999999998,
+        "velocity_xyz_mps": [
+          0.032806655025027734,
+          -0.1942879652170857,
+          -0.13223557111558068
+        ],
+        "displacement_xyz_m": [
+          3.4371316823865006,
+          -23.45411251515142,
+          -10.069969965502068
+        ],
+        "speed_xy_mps": 0.19703829587703675,
+        "displacement_xy_m": 23.704625457396443,
+        "speed_3d_mps": 0.2372979905317162,
+        "displacement_3d_m": 25.75487455185059,
+        "max_displacement_xy_m": 23.704625457396443
+      },
+      "horizontal_displacement_ratio": 1.5385715711248076
+    },
+    "B_180s_independent": {
+      "raw": {
+        "duration_s": 180.015,
+        "velocity_xyz_mps": [
+          0.07862025408603424,
+          0.01055101097444435,
+          -0.09796634049923453
+        ],
+        "displacement_xyz_m": [
+          5.0742110983831425,
+          -1.0167622567376602,
+          -14.065150002697072
+        ],
+        "speed_xy_mps": 0.07932507916879396,
+        "displacement_xy_m": 5.175077174079718,
+        "speed_3d_mps": 0.12605503582145136,
+        "displacement_3d_m": 14.986989969838852,
+        "max_displacement_xy_m": 5.175077174079718
+      },
+      "candidate": {
+        "duration_s": 180.015,
+        "velocity_xyz_mps": [
+          0.08789928140984055,
+          -0.04049152426377073,
+          0.21206963877388244
+        ],
+        "displacement_xyz_m": [
+          5.909055265680328,
+          -5.611893857410445,
+          13.840271982711199
+        ],
+        "speed_xy_mps": 0.09677730730687785,
+        "displacement_xy_m": 8.149250689462528,
+        "speed_3d_mps": 0.23310808415680237,
+        "displacement_3d_m": 16.061239533582896,
+        "max_displacement_xy_m": 8.149250689462528
+      },
+      "horizontal_displacement_ratio": 1.5747109492935643
+    }
+  }
+}

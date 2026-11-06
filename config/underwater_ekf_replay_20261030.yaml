@@ -1,0 +1,31 @@
+# 仅供离线分析；不被实机导航脚本读取。
+# 每段位置=本次有效UWB坐标+EKF偏差补偿后的相对积分；保留偏差，速度清零。
+sessions:
+  - logs/underwater_navigation_20261026/20261027_130133_underwater_navigation
+  - logs/underwater_navigation_20261026/20261027_141319_underwater_navigation
+output: logs/underwater_navigation_20261026/ekf_replay_20261030
+ekf:
+  # 单基站测距标准差(m)，R=range_sigma_m² I；越小越信任UWB。
+  range_sigma_m: 0.6
+  # 连续时间加速度过程噪声幅值 m/s²/sqrt(Hz)，不是原始加速度RMS。
+  accel_noise_density: 0.05
+  # 等效全局水平加速度偏差随机游走幅值 (m/s²)/sqrt(s)。
+  bias_random_walk: 0.003
+  # 启动偏差不确定性；初始偏差均值为0，启动标定b_body已扣除。
+  initial_bias_sigma_mps2: 0.10
+  initial_position_sigma_m: 0.7
+  # 每段开始沿用零速度假设，但保留其不确定性，非UWB测得的速度。
+  segment_velocity_sigma_mps: 0.10
+  # 上浮/等待不积分，未知位移方差=(此值*暂停时长)²；不是假定鱼静止。
+  pause_velocity_sigma_mps: 0.30
+  # 0=不低通，公平比较原始积分；>0=导航阶段两级低通，每段清零。
+  accel_tau_s: 0.0
+  # 四维测距创新NIS门限；超限不学习偏差，但日志已接受UWB仍重置位置。
+  # 更新前差值始终计入评估；强制重置后差值为0不是精度指标。
+  innovation_gate: 100.0
+  iterations: 3
+sweep:
+  range_sigma_m: [0.3, 0.6, 1.0]
+  initial_bias_sigma_mps2: [0.03, 0.10, 0.20]
+  pause_velocity_sigma_mps: [0.1, 0.3, 0.6]
+  accel_noise_density: [0.03, 0.10]

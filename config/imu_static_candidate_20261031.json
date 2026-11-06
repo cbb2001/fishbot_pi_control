@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "quaternion_order": "wxyz",
+  "rotation": "body_to_world",
+  "gravity_mps2": 9.80665,
+  "accel_bias_body_mps2": [
+    -0.00038311982965375375,
+    -3.209660022062405e-05,
+    -0.0017033754703200956
+  ],
+  "gyro_bias_body_radps": [
+    0.002423273378499701,
+    -0.00025206524441068786,
+    0.001696626291063791
+  ],
+  "selected_method": "mean180_bias",
+  "accel_two_stage_lpf_tau_s": 0.0,
+  "noise": {
+    "accel_density": [
+      0.001539334533450309,
+      0.0013842054803734542,
+      0.001
+    ],
+    "gyro_density": [
+      0.00010864921138377983,
+      0.0001,
+      0.0001
+    ],
+    "accel_bias_rw": [
+      0.00037387776449418145,
+      0.00033372107035602015,
+      8.112254248215654e-05
+    ],
+    "gyro_bias_rw": [
+      1.5317960384782235e-05,
+      1.0643055900905403e-05,
+      1.2071807157142077e-05
+    ],
+    "zupt_velocity_std_mps": 0.005,
+    "rest_gyro_std_radps": [
+      0.0005391478088043875,
+      0.0003,
+      0.0003
+    ],
+    "quiet_acc_std_max_mps2": 0.03,
+    "quiet_gyro_norm_max_radps": 0.04788822026754441,
+    "noise_estimator": "1s block-mean std; 10s block differences/sqrt(10) for bias RW; conservative engineering estimates, not Allan identification",
+    "fixed_hyperparameters": "ZUPT 10Hz, velocity std .005m/s, 1s quiet gate; no tuning on test"
+  },
+  "candidates": {
+    "raw_gravity_only": {
+      "bias": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "tau_s": 0.0
+    },
+    "startup5_bias": {
+      "bias": [
+        0.0005078885197083468,
+        -0.0004577713976462135,
+        -0.00012752368982866714
+      ],
+      "tau_s": 0.0
+    },
+    "mean180_bias": {
+      "bias": [
+        -0.00038311982965375375,
+        -3.209660022062405e-05,
+        -0.0017033754703200956
+      ],
+      "tau_s": 0.0
+    },
+    "robust_block_bias": {
+      "bias": [
+        -0.00037923501468243914,
+        5.278358786138248e-05,
+        -0.0017379135188684992
+      ],
+      "tau_s": 0.0
+    },
+    "recent60_bias": {
+      "bias": [
+        -0.0012574213232723049,
+        0.00048782908051668344,
+        -0.0022288837337863833
+      ],
+      "tau_s": 0.0
+    },
+    "mean180_bias_lpf02": {
+      "bias": [
+        -0.00038311982965375375,
+        -3.209660022062405e-05,
+        -0.0017033754703200956
+      ],
+      "tau_s": 0.2
+    },
+    "eskf_trained_bias_frozen": {
+      "bias": [
+        -0.001156939605453653,
+        -0.0019217189424403612,
+        -0.0022700443769806153
+      ],
+      "tau_s": 0.0
+    }
+  },
+  "source_session": "logs\\imu_static_20261031\\session_a",
+  "source_raw_sha256": "f00c7e61ca384f06e63b4a70b365b9af978708700aebf26cc62e4a8e6525fbc2",
+  "fit_interval_s": [
+    60,
+    240
+  ],
+  "selection_interval_s": [
+    240,
+    360
+  ],
+  "scope": "Candidate effective single-pose bias at this temperature/power cycle, NOT a full intrinsic calibration; dynamic validation required",
+  "temperature_calibration_available": false,
+  "auto_zupt_during_motion": false,
+  "imu_tid_modulus": 60000,
+  "integration": "Replace startup b_body, never subtract both. Correct gyro only if integrating raw gyro; does not correct vendor quaternion."
+}

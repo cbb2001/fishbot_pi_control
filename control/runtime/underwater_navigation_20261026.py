@@ -1,18 +1,72 @@
-"""水下导航纯计算：参数、惯性传播、稳定测距与双组动作调度。
+"""水下导航纯计算：参数、分段惯性/EKF、批量平均测距与双组动作调度。
 
-输出 z 向下；内部惯性 Z 向上。滤波只抑制摆鳍振动，不保证水平位置精度。
+输出和三维EKF的 z 向下；去重力加速度暂保持 Z 向上，进入EKF前转换。
+滤波只抑制摆鳍振动，不保证水平位置精度。
 """
 from __future__ import annotations
 
 import copy
 import math
 from collections import deque
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
-from .fixed_dive_20260920_100122 import FixedDiveScheduler, FixedFinSequence
+from .fixed_dive_20260920_100122 import FixedDiveScheduler, FixedFinSequence, ContinuousFinAction
+from .rl_actions_20260914 import build_rl_trajectory, validate_trajectory
 from .surface_navigation_20261010 import NavigationConfig, NavigationScheduler, UWBFrame
+from .underwater_ekf_20261101 import EKFConfig, NavigationEKF
+
+
+@dataclass(frozen=True)
+class UnderwaterWaypoint:
+    """一个目标段；t 为 None 时持续守点，正数表示到点或超时即切段。"""
+    x: float
+    y: float
+    h: float
+    t: float | None = None
+
+    def __post_init__(self):
+        for name in ('x','y','h','t'):
+            value=getattr(self,name)
+            if name=='t' and (value is None or isinstance(value,str) and value.lower()=='null'):
+                object.__setattr__(self,name,None)
+                continue
+            if isinstance(value,bool): raise ValueError(f'目标点 {name} 不能为布尔值')
+            try: value=float(value)
+            except (TypeError,ValueError) as exc:
+                raise ValueError(f'目标点 {name} 必须为有限数值，只有 t 可为 null') from exc
+            if not math.isfinite(value) or value<0 or (name=='t' and value==0):
+                raise ValueError(f'目标点 {name} 必须非负有限，t 必须为正数或 null')
+            if name=='t' and (not math.isfinite(value*1e9) or round(value*1e9)<1):
+                raise ValueError('目标点 t 无法表示为有效纳秒时间')
+            object.__setattr__(self,name,value)
+
+
+def parse_waypoints(rows):
+    """YAML 支持 {x,y,h,t} 或四元素列表；CLI 的四个字符串也在此校验。"""
+    if not isinstance(rows,(list,tuple)) or not rows:
+        raise ValueError('waypoints 必须至少包含一个 (x,y,h,t) 目标点')
+    result=[]
+    for index,row in enumerate(rows,1):
+        if isinstance(row,UnderwaterWaypoint): point=row
+        elif isinstance(row,dict) and set(row)=={'x','y','h','t'}:
+            point=UnderwaterWaypoint(**row)
+        elif isinstance(row,(list,tuple)) and len(row)==4:
+            point=UnderwaterWaypoint(*row)
+        else: raise ValueError(f'第 {index} 个目标点必须包含 x,y,h,t 四项')
+        result.append(point)
+    if result[-1].t is not None:
+        raise ValueError('最后一个目标点（含单目标）的 t 必须为 null')
+    return tuple(result)
+
+
+def validate_safety_depth(cfg,max_depth_m):
+    maximum=float(max_depth_m)
+    if not math.isfinite(maximum) or maximum<=0: raise ValueError('安全深度必须为正有限数')
+    for index,point in enumerate(cfg.route,1):
+        if point.h>=maximum:
+            raise ValueError(f'第 {index} 个目标点 h 必须低于安全深度 {maximum:g} 米')
 
 
 @dataclass(frozen=True)
@@ -42,6 +96,9 @@ class UnderwaterConfig:
     min_span_s: float = 1.5
     min_frames: int = 12
     uwb_age_s: float = .3
+    uwb_max_range_delta_m: float = 7.
+    uwb_average_frames: int = 5
+    ekf: EKFConfig = field(default_factory=EKFConfig)
     uwb_gap_s: float = .3
     min_retained: float = .8
     range_floor_m: float = .15
@@ -70,6 +127,7 @@ class UnderwaterConfig:
     ready_timeout_s: float = 5.
     safety_poll_s: float = .01
     center_ack_timeout_s: float = 2.
+    center_settle_s: float = 1.
     shutdown_timeout_s: float = 3.
     calibration_coverage_ratio: float = .8
     calibration_sample_ratio: float = .9
@@ -87,16 +145,20 @@ class UnderwaterConfig:
     command_hz: float = 50.
     log_flush_s: float = 1.
     log_queue_size: int = 10000
+    waypoints: tuple[UnderwaterWaypoint, ...] | None = None
 
     def __post_init__(self):
         if self.navigation.H is None or self.navigation.yaw_sign != 1:
             raise ValueError('水下导航要求 H 已知、yaw_sign=+1，先验证安装坐标')
         nonnegative = {'t1','depth_kp','depth_ki','accel_tau_s','yaw_tau_s','depth_tau_s',
                        'settle_s','stable_s','boundary_m'}
-        integers = {'min_frames','stable_frames','resume_depth_samples','log_queue_size'}
+        integers = {'min_frames','stable_frames','resume_depth_samples','log_queue_size','uwb_average_frames'}
+        if not isinstance(self.ekf,EKFConfig): raise ValueError('ekf 必须为 EKFConfig')
         for f in fields(self):
-            if f.name in ('navigation','auto_bias','initial_b2','pressure_drift_file'):
+            if f.name in ('navigation','auto_bias','initial_b2','pressure_drift_file','ekf','waypoints'):
                 continue
+            if f.name in integers and isinstance(getattr(self,f.name),bool):
+                raise ValueError(f'{f.name} 必须为整数，不能为布尔值')
             value = float(getattr(self,f.name))
             if not math.isfinite(value) or value < 0 or (value==0 and f.name not in nonnegative):
                 raise ValueError(f'{f.name} 必须为有效正数（允许零的项除外）')
@@ -126,10 +188,23 @@ class UnderwaterConfig:
             raise ValueError('配置频率无法表示为有效纳秒周期')
         if 1/self.imu_rate_hz>self.imu_gap_s:
             raise ValueError('imu_gap_s 必须覆盖配置的 IMU 采样周期')
+        if self.shutdown_timeout_s <= self.center_settle_s+1/self.command_hz:
+            raise ValueError('shutdown_timeout_s 必须大于 center_settle_s 加一个 PWM 写入周期')
+        if self.waypoints is not None:
+            object.__setattr__(self,'waypoints',parse_waypoints(self.waypoints))
+        for index,point in enumerate(self.route,1):
+            if not (0<=point.x<=self.navigation.L and 0<=point.y<=self.navigation.W):
+                raise ValueError(f'第 {index} 个目标点必须在 [0,L] × [0,W] 内')
+
+    @property
+    def route(self):
+        # 未配置点表时完全沿用旧的单目标入口。
+        return self.waypoints or (UnderwaterWaypoint(self.navigation.x_d,self.navigation.y_d,self.h0),)
 
     @classmethod
     def from_robot(cls, robot, **overrides):
         values=dict(robot.get('underwater_navigation_20261026',{}) or {})
+        values.setdefault('waypoints',None)  # 兼容已有的单目标配置文件。
         # 共享采集/PWM/日志设置只保留一个来源，禁止水下段再复制一份。
         shared_paths={
             'imu_rate_hz':('sensors','imu','sample_rate_hz'),
@@ -138,6 +213,7 @@ class UnderwaterConfig:
             'pressure_timeout_s':('sensors','depth','timeout_ms'),
             'power_timeout_s':('sensors','power','timeout_ms'),
             'command_hz':('servo','discrete_executor','command_hz'),
+            'center_settle_s':('servo','discrete_executor','center_settle_s'),
             'log_flush_s':('logging','flush_interval_s'),
             'log_queue_size':('logging','write_queue_maxsize'),
         }
@@ -151,6 +227,8 @@ class UnderwaterConfig:
                 raise ValueError(f'robot.yaml 缺少 {".".join(path)}') from exc
             values[name]=float(value)/1000 if path[-1]=='timeout_ms' else value
         values.update({k:v for k,v in overrides.items() if v is not None})
+        if values['waypoints'] is not None and any(overrides.get(k) is not None for k in ('x_d','y_d','h0')):
+            raise ValueError('waypoints 与单目标 --x-d/--y-d/--h0 不能同时使用；请直接修改点表')
         nav_names={f.name for f in fields(NavigationConfig)}-{f.name for f in fields(cls)}
         nav_values={k:values.pop(k) for k in list(values) if k in nav_names}
         if any(name in nav_values for name in ('L','W','H')):
@@ -162,6 +240,7 @@ class UnderwaterConfig:
         nav=NavigationConfig.from_robot(robot,**nav_values)
         missing={f.name for f in fields(cls)}-{'navigation'}-values.keys()
         if missing: raise ValueError('robot.yaml 水下配置缺少: '+', '.join(sorted(missing)))
+        values['ekf']=EKFConfig.from_mapping(values['ekf'])
         return cls(nav,**values)
 
 
@@ -178,6 +257,34 @@ class UnderwaterScheduler(FixedDiveScheduler):
             self.fin_sequence=FixedFinSequence(last_b2=self.fin_sequence.last_b2)
             self._fin_sequence_interrupted=False
         return result
+
+
+class SurfaceFinPolicy:
+    """固定上浮：4号根部最大/最小交替，b2仅在成功完成b1=1后取反。"""
+    def __init__(self,calibration,duration_s,initial_b2=1,last_b2=0):
+        self.sequence=FixedFinSequence(last_b2=last_b2)
+        self.initial_b2=initial_b2
+        self.high=calibration.limits[4][1]-calibration.centers[4]
+        self.low=calibration.limits[4][0]-calibration.centers[4]
+        self.duration_s=duration_s
+        # 完整行程必须满足左右根部/鳍尖机械限位，不静默缩幅。
+        for previous in (0.,self.low):
+            action=ContinuousFinAction(self.high,duration_s,0,1)
+            validate_trajectory(build_rl_trajectory(action,previous,calibration),calibration.limits)
+        for b2 in (-1,1):
+            action=ContinuousFinAction(self.low,duration_s,1,b2)
+            validate_trajectory(build_rl_trajectory(action,self.high,calibration),calibration.limits)
+
+    def next_action(self):
+        if self.sequence.next_b1==0:
+            # action2旧定义在b1=0时忽略b2，并将日志中的b2规范化为0。
+            return ContinuousFinAction(self.high,self.duration_s,0,1)
+        b2=-self.sequence.last_b2 if self.sequence.last_b2 else self.initial_b2
+        return ContinuousFinAction(self.low,self.duration_s,1,b2)
+
+    def acknowledge(self,action):
+        if action!=self.next_action(): raise RuntimeError('上浮完成回执与当前动作不匹配')
+        self.sequence=self.sequence.after(action)
 
 
 def rotation(quat):
@@ -202,7 +309,7 @@ def forward_tid(previous,current):
 
 
 class InertialEstimator:
-    """有限历史保存原样本及传播后的检查点，校正后重放而非重复滤波。"""
+    """旧连续积分/延迟回放估计器，保留供历史分析；实机使用 NavigationEstimator。"""
     def __init__(self,cfg,bias=(0,0,0),yaw_zero_deg=0,gravity=None):
         self.cfg,self.bias,self.gravity=cfg,np.asarray(bias,dtype=float),cfg.gravity_mps2 if gravity is None else gravity
         angle=math.radians(-yaw_zero_deg)
@@ -275,7 +382,7 @@ class InertialEstimator:
                 return row[3][7]
         return None
 
-    def correct(self,t,xy,velocity):
+    def correct(self,t,xy,velocity,*,reset_accel_filter=True):
         history=list(self.history)
         # IMU/压力输入必须按采集时间合并，检查点以同一时间轴保存。
         eligible=[i for i,row in enumerate(history) if row[0]<=t]
@@ -293,6 +400,11 @@ class InertialEstimator:
         innovation={'position':(np.asarray(xy)-self.p[:2]).tolist(),
                     'velocity':(np.asarray(velocity)-self.v[:2]).tolist()}
         self.p[:2]=xy; self.v[:2]=velocity
+        if reset_accel_filter:
+            # 在定位采集时刻重置两级加速度滤波，避免上一航段/上浮动作的
+            # 滤波残留继续驱动积分；保留原始观测、标定偏置和压力状态。
+            self.a1.fill(0.)
+            self.a2.fill(0.)
         # 丢弃校正前历史，避免后续定位回到旧坐标系；保留校正检查点。
         self.history=deque([(t,'fix',None,self._snapshot())])
         for stamp,kind,data,_ in history[index+1:]:
@@ -300,6 +412,124 @@ class InertialEstimator:
             if kind=='imu': self.imu(stamp,data)
             elif kind=='pressure': self.pressure(stamp,data)
         self.initialized=True
+        return innovation
+
+
+class NavigationEstimator:
+    """只在导航阶段传播的估计器；传感器健康时间与积分时间分别维护。"""
+    def __init__(self,cfg,bias=(0,0,0),yaw_zero_deg=0,gravity=None):
+        self.cfg=cfg; self.bias=np.asarray(bias,dtype=float).copy()
+        self.gravity=cfg.gravity_mps2 if gravity is None else gravity
+        angle=math.radians(-yaw_zero_deg)
+        self.pool=np.array([[math.cos(angle),-math.sin(angle),0],
+                            [math.sin(angle),math.cos(angle),0],[0,0,1]])
+        self.p=np.zeros(3); self.v=np.zeros(3)
+        self.a1=np.zeros(3); self.a2=np.zeros(3); self.raw_acc=np.zeros(3)
+        self.last_imu=None; self.last_depth=None; self.last_tid=None; self.depth=None
+        self.initialized=False
+        nav=cfg.navigation
+        self.ekf=NavigationEKF(cfg.ekf,nav.L,nav.W,nav.H)
+        self.origin_xy=np.zeros(2)
+        self.integrating=False; self.segment_start_ns=None; self.segment_end_ns=None
+        self.last_integrated_ns=None; self.last_filter_ns=None
+
+    @property
+    def relative_xy(self): return (self.p[:2]-self.origin_xy).tolist()
+
+    @property
+    def relative_xyz(self): return (self.p-np.r_[self.origin_xy,0.]).tolist()
+
+    @property
+    def xyz(self): return self.p.tolist()
+
+    @property
+    def filtered_acc(self): return self.a2.tolist()
+
+    def start_navigation(self,t_ns,end_ns):
+        if not self.initialized or end_ns<=t_ns: raise ValueError('导航须先完成有效UWB平均定位')
+        self.integrating=True; self.segment_start_ns=int(t_ns); self.segment_end_ns=int(end_ns)
+        self.last_integrated_ns=None; self.last_filter_ns=None
+        self.a1.fill(0.); self.a2.fill(0.); self.ekf.resume()
+
+    def pause_navigation(self,t_ns):
+        if self.integrating:
+            self.integrating=False
+            self.ekf.pause(t_ns)
+        self.last_integrated_ns=None; self.last_filter_ns=None
+        self.a1.fill(0.); self.a2.fill(0.)
+
+    def _in_segment(self,t):
+        if self.integrating and t>=self.segment_end_ns: self.pause_navigation(self.segment_end_ns)
+        return self.integrating and t>self.segment_start_ns
+
+    def _sync_state(self):
+        self.p[:]=self.ekf.x[:3]; self.v[:]=self.ekf.x[3:6]
+
+    def _advance(self,t,acc_up):
+        previous_t=self.segment_start_ns if self.last_integrated_ns is None else self.last_integrated_ns
+        dt=(t-previous_t)/1e9
+        if dt<=0: return  # 同一时刻的压力/IMU只传播一次。
+        if dt>self.cfg.imu_gap_s: raise ValueError('IMU navigation gap exceeds imu_gap_s')
+        acceleration=np.asarray(acc_up,dtype=float).copy(); acceleration[2]*=-1
+        self.ekf.predict(dt,acceleration)
+        self.last_integrated_ns=t; self._sync_state()
+
+    def imu(self,t,data):
+        if self.last_imu is not None and t<=self.last_imu: return False
+        if not forward_tid(self.last_tid,data.get('tid')): return False
+        if self.last_imu is not None and (t-self.last_imu)/1e9>self.cfg.imu_gap_s:
+            raise ValueError('IMU time gap exceeds imu_gap_s')
+        acc=np.asarray(data['acc_mps2'],dtype=float)
+        if acc.shape!=(3,) or not np.isfinite(acc).all(): raise ValueError('invalid acceleration')
+        self.raw_acc=self.pool @ (rotation(data['quat']) @ (acc-self.bias)-[0,0,self.gravity])
+        # 即使暂停积分也继续检查采样连续性/姿态，不能把健康时间一起清零。
+        self.last_imu=t; self.last_tid=data.get('tid')
+        if not self._in_segment(t): return True
+        previous_t=self.segment_start_ns if self.last_filter_ns is None else self.last_filter_ns
+        dt=(t-previous_t)/1e9
+        if dt>self.cfg.imu_gap_s: raise ValueError('IMU navigation start gap exceeds imu_gap_s')
+        previous=self.a2.copy(); gain=alpha(dt,self.cfg.accel_tau_s)
+        self.a1+=gain*(self.raw_acc-self.a1); self.a2+=gain*(self.a1-self.a2)
+        # 无低通时首样本在本段短间隔内常值；有低通时从零建立，不能继承上浮滤波。
+        if self.last_filter_ns is None and self.cfg.accel_tau_s==0: previous=self.a2.copy()
+        self._advance(t,.5*(previous+self.a2)); self.last_filter_ns=t
+        return True
+
+    def pressure(self,t,depth):
+        if self.last_depth is not None and t<=self.last_depth: return False
+        if not math.isfinite(depth): raise ValueError('invalid pressure depth')
+        if self.last_depth is None or self.depth is None: self.depth=float(depth)
+        else:
+            gain=alpha((t-self.last_depth)/1e9,self.cfg.depth_tau_s)
+            self.depth+=gain*(depth-self.depth)
+        self.last_depth=t
+        if self._in_segment(t):
+            # 先用最近已知加速度传播到压力采集时刻，再做观测更新；不重复积分。
+            self._advance(t,self.a2)
+            self.ekf.update_depth(float(depth))  # 使用校准压力，避免低通延迟被当成深度误差。
+            self._sync_state()
+        elif not self.integrating:
+            # 暂停不做惯性传播/偏差学习，显示压力深度，XY保持不动。
+            self.p[2]=self.depth; self.v[2]=0.
+        return True
+
+    def depth_at(self,t):
+        # UWB定位固定使用水面深度0；导航中的压力另作为EKF观测。
+        return 0.
+
+    def apply_surface_fix(self,fix,now):
+        if self.integrating: raise ValueError('导航阶段不能重新设置UWB起点')
+        innovation={'position':(np.asarray(fix.xy)-self.p[:2]).tolist(),
+                    'velocity':(-self.v[:2]).tolist()}
+        # 无导航期间的回放。平均测距描述水面位置，校正后从实际恢复时刻重新计时。
+        info=self.ekf.surface_fix(fix.t_ns,fix.xy,fix.ranges_m)
+        self.p[:2]=fix.xy; self.p[2]=0.; self.v.fill(0.); self.depth=0.
+        self.origin_xy=np.asarray(fix.xy,dtype=float).copy()
+        self.a1.fill(0.); self.a2.fill(0.); self.raw_acc.fill(0.)
+        self.last_integrated_ns=None; self.last_filter_ns=None
+        self.ekf.last_pressure_update={}
+        self.segment_start_ns=None; self.segment_end_ns=None; self.initialized=True
+        innovation['ekf']=info
         return innovation
 
 
@@ -318,7 +548,81 @@ class StableFix:
     quality: dict
 
 
+@dataclass(frozen=True)
+class RawUWBFix:
+    t_ns: int
+    frame_id: str
+    ranges_m: tuple
+    xy: list
+    velocity: list
+    quality: dict
+
+
+class AcceptedUWB:
+    """累计 n 个有效四路帧，逐路平均后定位；归中前后/不同航段不混用。"""
+    def __init__(self,cfg):
+        self.cfg=cfg
+        self.last_accepted=None
+        self.committed_ids=deque(maxlen=4096)
+        self.reset(-1)
+
+    def reset(self,boundary_ns):
+        self.boundary=boundary_ns
+        self.seen=deque(maxlen=512)
+        self.rows=[]; self.published=False
+        self.reason='waiting_frames'
+        self.quality={}
+
+    def add(self,obs,now):
+        if (self.published or obs.t_ns<=self.boundary or obs.frame.frame_id in self.seen
+                or any(row.frame.frame_id==obs.frame.frame_id for row in self.rows)
+                or obs.frame.frame_id in self.committed_ids): return None
+        if self.last_accepted is not None and (obs.t_ns<=self.last_accepted.t_ns
+                or obs.frame.frame_id==self.last_accepted.frame_id): return None
+        self.seen.append(obs.frame.frame_id)
+        if self.rows and obs.t_ns<self.rows[-1].t_ns: return None
+        self.quality={'mode':'mean_valid_ranges','ranges_m':list(obs.frame.ranges_m),
+                      'frames':len(self.rows),'required_frames':self.cfg.uwb_average_frames,
+                      'reference_frame_id':None if self.last_accepted is None else self.last_accepted.frame_id,
+                      'max_range_delta_m':self.cfg.uwb_max_range_delta_m}
+        if not 0<=now-obs.t_ns<=self.cfg.uwb_age_s*1e9:
+            self.reason='stale'; return None
+        ranges=obs.frame.ranges_m
+        if len(ranges)!=4 or any(v is None or not math.isfinite(v) or v<=0 for v in ranges):
+            self.reason='incomplete'; return None
+        reference=(self.last_accepted.ranges_m if self.last_accepted is not None else
+                   self.rows[0].frame.ranges_m if self.rows else None)
+        if reference is not None:
+            delta=[abs(a-b) for a,b in zip(ranges,reference)]
+            self.quality['range_delta_m']=delta
+            if any(d>self.cfg.uwb_max_range_delta_m+1e-9 for d in delta):
+                self.reason='range_jump'; return None
+        self.rows.append(obs)
+        self.quality['frames']=len(self.rows)
+        if len(self.rows)<self.cfg.uwb_average_frames:
+            self.reason='collecting'; return None
+        # 平均的是四路距离，不是不同报文拼凑的四路，也不是先解算坐标再平均。
+        averaged=np.mean([row.frame.ranges_m for row in self.rows],axis=0)
+        a,b,d,e=np.square(averaged); c=self.cfg.navigation
+        xy=[float((a-b+e-d+2*c.L*c.L)/(4*c.L)),
+            float((a-e+b-d+2*c.W*c.W)/(4*c.W))]
+        if not np.isfinite(xy).all():
+            self.rows.clear(); self.reason='invalid_geometry'; return None
+        self.quality.update(frame_ids=[row.frame.frame_id for row in self.rows],
+                            sample_times_ns=[row.t_ns for row in self.rows],
+                            samples_ranges_m=[list(row.frame.ranges_m) for row in self.rows],
+                            ranges_m=averaged.tolist(),surface_depth_m=0.)
+        self.reason='accepted'
+        self.published=True
+        return RawUWBFix(obs.t_ns,obs.frame.frame_id,tuple(averaged.tolist()),xy,[0.,0.],dict(self.quality))
+
+    def commit(self,fix):
+        self.last_accepted=fix
+        self.committed_ids.extend(fix.quality['frame_ids'])
+
+
 class StableUWB:
+    """旧稳定窗口算法，仅保留供历史回放；当前导航入口使用AcceptedUWB。"""
     def __init__(self,cfg):
         self.cfg=cfg; self.reset(-1)
 

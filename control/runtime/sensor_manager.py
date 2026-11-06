@@ -250,6 +250,7 @@ class SensorManager:
                     baudrate=int(imu_cfg.get("baudrate", 460800)),
                     timeout_s=float(imu_cfg.get("serial_timeout_s", 0.1)),
                     sample_rate_hz=float(imu_cfg["sample_rate_hz"]),
+                    tid_modulus=imu_cfg.get("tid_modulus", 65536),
                     stop_event=self.stop_event,
                 )
             )

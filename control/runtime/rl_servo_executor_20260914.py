@@ -20,6 +20,7 @@ class RLServoExecutorConfig:
     command_hz: float = 50.0
     safe_recenter_s: float = 2.0
     initial_move_s: float = 0.0
+    terminal_center_hold_s: float = 0.0
     hold_at_center: bool = False  # 水面保持可直接回中；其他任务默认冻结当前角度。
 
     def __post_init__(self):
@@ -27,7 +28,8 @@ class RLServoExecutorConfig:
             raise ValueError('hold_at_center must be boolean')
         if not math.isfinite(self.command_hz) or self.command_hz <= 0:
             raise ValueError('command_hz must be positive and finite')
-        if any(not math.isfinite(v) or v < 0 for v in (self.safe_recenter_s, self.initial_move_s)):
+        if any(not math.isfinite(v) or v < 0 for v in (
+                self.safe_recenter_s, self.initial_move_s, self.terminal_center_hold_s)):
             raise ValueError('servo durations must be finite and nonnegative')
 
     @property
@@ -126,6 +128,9 @@ class RLServoExecutor:
         self.last_lateness_us = 0.
         self.last_successful_servo_ids = ()
         self.last_write_ack_t_ns = None
+        self.terminal_center_ack_t_ns = None
+        self.terminal_center_hold_completed_t_ns = None
+        self.pwm_disabled_t_ns = None
 
     def submit(self, agent, action, context=None):
         required = TAIL_SERVO_IDS if isinstance(action, TailAction) else FIN_SERVO_IDS
@@ -295,6 +300,7 @@ class RLServoExecutor:
             ticket.ack_t_ns, ticket.angles_deg = ack, refs
             if ticket.terminal:
                 self._terminal_centered = True
+                self.terminal_center_ack_t_ns = ack
                 self.stop_event.set()
         except BaseException as exc:
             ticket.failure = exc
@@ -394,6 +400,17 @@ class RLServoExecutor:
             self.stop_event.set()
         finally:
             if controller_ready:
+                # 中位写入回执只确认寄存器写入，不代表电机已到位。正常终止
+                # 保持中位脉冲一段时间；急停/安全监测仍可在保持期间中断。
+                if (self._terminal_centered and self.failure is None
+                        and not self.emergency_event.is_set() and not self.shutdown_event.is_set()):
+                    end = self.terminal_center_ack_t_ns + round(self.config.terminal_center_hold_s*1e9)
+                    while not self.emergency_event.is_set() and not self.shutdown_event.is_set():
+                        remaining = (end-self.clock_ns())/1e9
+                        if remaining <= 0:
+                            self.terminal_center_hold_completed_t_ns = self.clock_ns()
+                            break
+                        self.emergency_event.wait(min(remaining, .01))
                 # 故障时不再移动回中，避免低电压、过流或未知姿态下继续施力。
                 if (self.failure is None and not self.emergency_event.is_set()
                         and not self.shutdown_event.is_set() and not self._terminal_centered):
@@ -403,18 +420,23 @@ class RLServoExecutor:
                         self._report_failure(exc, 'SERVO_RECENTER_FAILED')
                 if not self.keep_pwm or self.failure is not None or self.emergency_event.is_set() or self.shutdown_event.is_set():
                     channels = [self.servo_id_to_channel.get(i, i) for i in self.active_servo_ids]
+                    disabled = True
                     if hasattr(self.controller, 'stop'):
                         # 某通道关闭失败也继续尝试其余通道；仅操作侧鳍活动通道。
                         for channel in channels:
                             try:
                                 self.controller.stop(channel)
                             except BaseException as exc:
+                                disabled = False
                                 self._report_failure(exc, 'SERVO_PWM_STOP_FAILED')
                     else:
                         try:
                             self.controller.stop_all(channels)
                         except BaseException as exc:
+                            disabled = False
                             self._report_failure(exc, 'SERVO_PWM_STOP_FAILED')
+                    if disabled:
+                        self.pwm_disabled_t_ns = self.clock_ns()
             self.stop_event.set()
             self.scheduler.hold({sid: self.tracker.latest_commanded_angles()[sid]
                                  for sid in self.active_servo_ids})

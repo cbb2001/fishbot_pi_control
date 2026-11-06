@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""定时上浮校正的水下单目标导航。先放置 t1、静止标定 t2，再立即开始任务。
+"""定时上浮校正的水下单点/多点导航。先放置 t1、静止标定 t2，再立即开始任务。
+上浮使用侧鳍全行程往复；任意一路 UWB 恢复后归中，累计默认5个有效四路帧平均定位，水面z=0。
+仅导航阶段进行IMU/EKF积分；每次重定位重置航段积分状态，保留启动传感器标定。
 
 实机：python scripts/run_underwater_navigation_20261026.py --h0 .3 --x-d 10 --y-d 10 --confirm MOVE
 模拟：python scripts/run_underwater_navigation_20261026.py --dry-run --t1 0 --t2 1 --t3 15 --t4 2
+多点：python scripts/run_underwater_navigation_20261026.py --waypoint 10 10 .3 20 --waypoint 15 10 .5 NULL --confirm MOVE
 只采集：python scripts/run_underwater_navigation_20261026.py --no-servo --t3 60
 """
 from __future__ import annotations
@@ -17,7 +20,7 @@ from _bootstrap import add_project_root
 add_project_root()
 
 from control.runtime.data_logger import create_run_log_dir
-from control.runtime.underwater_navigation_20261026 import UnderwaterConfig
+from control.runtime.underwater_navigation_20261026 import UnderwaterConfig, validate_safety_depth
 from control.runtime.underwater_navigation_session_20261026 import run_session
 
 
@@ -25,6 +28,8 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__,formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--config',type=Path,default=Path('config/robot.yaml'))
     parser.add_argument('--output',type=Path,help='新的日志目录；默认在 logs 下自动创建时间戳目录')
+    parser.add_argument('--waypoint',dest='waypoints',nargs=4,action='append',metavar=('X','Y','H','T'),
+                        help='可重复的目标段；T正数=水平到点或超时切段，NULL=不切段；末点T必须NULL')
     arguments={'h0':'目标水深，米，向下为正','x_d':'目标 X，米','y_d':'目标 Y，米',
         't1':'人工放置时间','t2':'固定静止标定窗口','t3':'总任务时间，包含上浮取数',
         't4':'每段导航最长时间，到期上浮','depth_kp':'胸鳍比例系数','depth_ki':'胸鳍积分系数',
@@ -44,8 +49,9 @@ def main():
         parser.error('真实运动须显式提供 --confirm MOVE')
     try:
         robot=yaml.safe_load(args.config.read_text(encoding='utf8')) or {}
-        cfg=UnderwaterConfig.from_robot(robot,**{n:getattr(args,n) for n in (*arguments,'initial_b2')})
-        if cfg.h0>=float(robot['safety']['max_depth_m']): raise ValueError('h0 必须低于安全深度')
+        cfg=UnderwaterConfig.from_robot(robot,waypoints=args.waypoints,
+                                       **{n:getattr(args,n) for n in (*arguments,'initial_b2')})
+        validate_safety_depth(cfg,robot['safety']['max_depth_m'])
         if args.output:
             args.output.mkdir(parents=True,exist_ok=False); session=args.output
         else:

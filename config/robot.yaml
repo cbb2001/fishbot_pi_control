@@ -18,7 +18,7 @@ surface_navigation_20261010:
   t_0: 0.3       # 每个action1的秒数；0为下一个PWM周期直接写目标
   kp: 1.0
   ki: 0.1        # 1/s；正值启用积分，先按实际水池调参
-  yaw_error_scale_deg: 90.0  # 最短角差范围[-180,180)，归一化默认除以90
+  yaw_error_scale_deg: 10.0  # 最短角差范围[-180,180)，归一化默认除以90
   delta_yaw: 10.0 # 角度阈值，度；与距离阈值同时满足才停止。
   delta_s: 0.2   # 距离阈值，米。
   imu_filter_tau_s: 0.15
@@ -226,9 +226,9 @@ servo:
       role: right_pectoral_root
       joint_name: YQ1_JOINT
       channel: 5
-      center_angle: 143
-      min_angle: 90 #100
-      max_angle: 196 #190
+      center_angle: 123 #143
+      min_angle: 70 #90 #100
+      max_angle: 176 #196 #190
       actuation_range: 270
       sign: 1
       direction:
@@ -291,28 +291,57 @@ discrete_absolute_actions_20260725:
 # L/W 必须是四基站实际矩形边长，H 是基站到初始水面标签的天线高度差。
 # 首次标定/定位后立即导航；以后每段 t4 到期上浮。相机开关及存图遵循 sensors.vision。
 underwater_navigation_20261026:
-  h0: 0.3
+  h0: 0.5
+  # null 保留原 x_d/y_d/h0 单目标；非空列表按顺序执行 (x,y,h,t)，单位 m/m/m/s。
+  # 每点也可写为 [x,y,h,t]。t 为正数：水平到点或超时即切下一点；h 不参与到点判断。
+  # t:null：保持当前目标，不切下一点；单点和最后一点的 t 必须为 null。
+  # 首点 t 从首次导航起算，之后从切到该点起算，包含上浮和等待UWB；切点不重置 t3/t4。
+  # 多点示例（使用时将 waypoints:null 替换为下面的列表）：
+  # waypoints:
+  #   - {x: 10, y: 10, h: 0.3, t: 20}
+  #   - {x: 15, y: 10, h: 0.5, t: 25}
+  #   - {x: 15, y: 15, h: 0.4, t: null}
+  waypoints: null
   t1: 5.0                    # 人工放置，鱼头朝水池 +X，不初始化 PWM
   t2: 5.0                    # 全窗口静止 IMU/压力校准
-  t3: 120.0                  # 首次导航起总任务时间，包含上浮与取数
-  t4: 5.0                    # 每段导航时间，包含下潜及到点保持
+  t3: 60.0                  # 首次导航起总任务时间，包含上浮与取数
+  t4: 10.0                    # 每段导航时间，包含下潜及到点保持
   depth_kp: 1.0
-  depth_ki: 0.0
+  depth_ki: 0.1
   fin_duration_s: 0.3
   initial_b2: 1
   accel_tau_s: 0.20          # 两级串联一阶低通，各级时间常数；0 关闭
   yaw_tau_s: 0.15
-  depth_tau_s: 0.15
-  history_s: 5.0             # UWB 延迟校正的原始样本/滤波状态历史
+  depth_tau_s: 0.15          # 暂停时压力显示低通；导航EKF直接用校准压力观测，避免引入延迟
+  history_s: 5.0             # 旧连续积分回放兼容字段；分段导航不回放上浮/等待样本
   imu_gap_s: 0.05
   # IMU/压力/电源的新鲜度直接读取 sensors.*.timeout_ms，不在此重复定义。
-  fix_timeout_s: 30.0
-  surface_timeout_s: 30.0
-  settle_s: 1.0              # 全归中后机械/水面扰动消退时间
+  fix_timeout_s: 30.0        # 仅首次定位预算；后续上浮/再接收仅受t3约束
+  surface_timeout_s: 30.0    # 旧稳定窗口模式兼容字段，当前入口不使用
+  settle_s: 1.0              # 旧稳定窗口模式兼容字段，当前入口不等待静置
   window_s: 2.0
   min_span_s: 1.5
   min_frames: 12
   uwb_age_s: 0.3
+  uwb_max_range_delta_m: 5.0 # 四路逐项与上一组已接受平均距离比较；首组与组内首帧比较
+  uwb_average_frames: 5     # 每轮累计n个有效、完整、不重复的mc帧，四路分别平均后解算XY
+  # 九状态[x,y,z,vx,vy,vz,bx,by,bz]，z向下；导航积分三轴，压力校正z/vz/bz。
+  # 默认参考 logs/underwater_navigation_20261026/ekf_replay_20261030/selected_config.yaml。
+  # 加速度低通继续使用本段 accel_tau_s=0.20（同目录Y向分析中有单独对比）。
+  ekf:
+    enabled: true
+    retain_bias_on_fix: true # 保留EKF等效偏差；速度/位移/积分时刻/低通每段清零，启动标定始终保留
+    range_sigma_m: 0.3       # 平均测距标准差(m)，R=sigma²I；保守地不自动除以sqrt(n)
+    accel_noise_density: 0.03 # 连续加速度过程噪声幅值 m/s²/sqrt(Hz)
+    bias_random_walk: 0.003  # 三轴全局等效加速度偏差随机游走 (m/s²)/sqrt(s)
+    initial_bias_sigma_mps2: 0.03
+    initial_position_sigma_m: 0.7 # 初始/退化几何的位置不确定性；正常重定位按基站几何计算
+    segment_velocity_sigma_mps: 0.10 # 每段零速度先验的不确定性，不是实际测得速度
+    pause_velocity_sigma_mps: 0.30 # 上浮/等待未知位移方差=(此值*暂停时长)²
+    pressure_sigma_m: 0.01   # 压力深度标准差(m)；旧日志静止约0.0027~0.0047m，取1cm留余量
+    pressure_innovation_gate: 9.0 # 一维压力观测NIS门限，异常压力不更新EKF；安全监测仍独立工作
+    innovation_gate: 100.0   # 四路测距+水面z=0的五维NIS门限；只限制偏差学习，不阻止重定位
+    iterations: 3           # 非线性测距观测的迭代线性化次数
   uwb_gap_s: 0.3
   min_retained: 0.8
   range_floor_m: 0.15
@@ -324,9 +353,9 @@ underwater_navigation_20261026:
   stable_s: 0.5
   stable_frames: 3
   boundary_m: 5
-  resume_depth_m: 0.02       # 上浮压力零点暂停后的恢复回差
+  resume_depth_m: 0.02       # 旧模式兼容字段；固定上浮序列不按压力暂停
   resume_depth_samples: 3
-  auto_bias: false           # 水面归中不等于静止，默认只校正位置/速度
+  auto_bias: false           # 旧模式兼容字段；单帧模式不自动修改加速度零偏
   bias_window_s: 2.0
   bias_speed_mps: 0.03
   bias_gyro_radps: 0.05
